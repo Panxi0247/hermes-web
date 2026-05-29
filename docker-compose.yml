@@ -1,0 +1,22 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    environment:
+      HERMES_HOST: ${HERMES_HOST:-host.docker.internal}
+      HERMES_PORT: ${HERMES_PORT:-8642}
+      API_KEY: ${API_KEY:-hermes-client-key}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
