@@ -4,12 +4,11 @@ Provides OpenAI-compatible API + WebSocket terminal
 """
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional, Literal
+import datetime
 import httpx
-import asyncio
-import json
 import os
 
 # Config
@@ -65,21 +64,34 @@ class ChatCompletionRequest(BaseModel):
     max_tokens: Optional[int] = None
 
 
-class DeltaContent(BaseModel):
-    role: Optional[str] = None
-    content: Optional[str] = None
-    finish_reason: Optional[str] = None
-
-
-class StreamChunk(BaseModel):
-    id: str
-    object: str = "chat.completion.chunk"
-    created: int
-    model: str
-    choices: List[dict]
-
-
 # --- WebSocket Terminal ---
+def validate_allowed_command(command: str, args: List[str]) -> Optional[str]:
+    if command not in ALLOWED_COMMANDS:
+        return f"Command not allowed: {command}\nAvailable commands: {', '.join(ALLOWED_COMMANDS.keys())}\n"
+
+    spec = ALLOWED_COMMANDS[command]
+    if len(args) < spec["args"]:
+        return f"Usage: {spec['description']}\n"
+
+    return None
+
+
+def execute_allowed_command(command: str, args: List[str], *, allow_ls_path: bool = False) -> str:
+    if command == "echo":
+        return " ".join(args) + "\n"
+    if command == "date":
+        return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S\n")
+    if command == "pwd":
+        return os.getcwd() + "\n"
+    if command == "ls":
+        path = args[0] if allow_ls_path and args else "."
+        entries = os.listdir(path)
+        return "  ".join(sorted(entries)) + "\n"
+    if command == "whoami":
+        return os.getenv("USER", "unknown") + "\n"
+    return ""
+
+
 class TerminalSession:
     def __init__(self, websocket: WebSocket):
         self.ws = websocket
@@ -100,32 +112,15 @@ class TerminalSession:
         command = parts[0]
         args = parts[1:]
         
-        if command not in ALLOWED_COMMANDS:
-            await self.send_output(f"Command not allowed: {command}\n")
-            await self.send_output(f"Available commands: {', '.join(ALLOWED_COMMANDS.keys())}\n", stream_end=True)
+        validation_error = validate_allowed_command(command, args)
+        if validation_error:
+            await self.send_output(validation_error, stream_end=True)
             return
         
-        spec = ALLOWED_COMMANDS[command]
-        if len(args) < spec["args"]:
-            await self.send_output(f"Usage: {spec['description']}\n", stream_end=True)
-            return
-        
-        # Execute whitelisted commands
-        if command == "echo":
-            await self.send_output(" ".join(args) + "\n", stream_end=True)
-        elif command == "date":
-            import datetime
-            await self.send_output(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S\n"), stream_end=True)
-        elif command == "pwd":
-            await self.send_output(os.getcwd() + "\n", stream_end=True)
-        elif command == "ls":
-            try:
-                entries = os.listdir(".")
-                await self.send_output("  ".join(sorted(entries)) + "\n", stream_end=True)
-            except Exception as e:
-                await self.send_output(f"Error: {e}\n", stream_end=True)
-        elif command == "whoami":
-            await self.send_output(os.getenv("USER", "unknown") + "\n", stream_end=True)
+        try:
+            await self.send_output(execute_allowed_command(command, args), stream_end=True)
+        except Exception as e:
+            await self.send_output(f"Error: {e}\n", stream_end=True)
 
 
 terminal_sessions: List[TerminalSession] = []
@@ -232,35 +227,21 @@ class CliResponse(BaseModel):
 @app.post("/api/cli", response_model=CliResponse)
 async def run_cli(req: CliRequest):
     """Execute a whitelisted CLI command"""
-    if req.command not in ALLOWED_COMMANDS:
+    validation_error = validate_allowed_command(req.command, req.args)
+    if validation_error and req.command not in ALLOWED_COMMANDS:
         raise HTTPException(
             status_code=403, 
             detail=f"Command '{req.command}' not in whitelist. Available: {list(ALLOWED_COMMANDS.keys())}"
         )
     
-    spec = ALLOWED_COMMANDS[req.command]
-    if len(req.args) < spec["args"]:
+    if validation_error:
         return CliResponse(
             output="",
-            error=f"Usage: {spec['description']}"
+            error=validation_error.strip()
         )
     
     try:
-        if req.command == "echo":
-            output = " ".join(req.args) + "\n"
-        elif req.command == "date":
-            import datetime
-            output = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S\n")
-        elif req.command == "pwd":
-            output = os.getcwd() + "\n"
-        elif req.command == "ls":
-            entries = os.listdir("." if not req.args else req.args[0])
-            output = "  ".join(sorted(entries)) + "\n"
-        elif req.command == "whoami":
-            output = os.getenv("USER", "unknown") + "\n"
-        else:
-            output = ""
-        
+        output = execute_allowed_command(req.command, req.args, allow_ls_path=True)
         return CliResponse(output=output)
     except Exception as e:
         return CliResponse(output="", error=str(e))

@@ -1,6 +1,16 @@
 #!/bin/bash
 # hermes-web 啟動腳本
 # 啟動所有必要服務：FastAPI後端 + Vite前端 + Hermes API Server + WebSocket Bridge
+#
+# 部署約束：
+#   - FastAPI/Vite/ws_bridge 綁定 0.0.0.0（對外暴露）
+#   - Hermes API (8642) 僅供內部呼叫，依賴 UFW 防火牆阻擋外部訪問
+#   - 所有 URL 不可寫死 localhost，需讀取環境變數動態取得伺服器 IP
+#
+# 環境變數（從 .env 讀取）：
+#   SERVER_IP         伺服器 IP（Vite/FastAPI/ws_bridge 對外 URL 使用）
+#   HERMES_HOST       Hermes API 主機（預設 127.0.0.1）
+#   HERMES_PORT       Hermes API port（預設 8642）
 
 set -e
 
@@ -12,14 +22,31 @@ mkdir -p "$LOG_DIR"
 # hermes CLI 完整路徑
 HERMES_BIN="/home/fu/.local/bin/hermes"
 
+# ── 載入 .env 環境變數 ────────────────────────────────────────────────
+ENV_FILE="$SCRIPT_DIR/.env"
+if [[ -f "$ENV_FILE" ]]; then
+    set -a
+    source "$ENV_FILE"
+    set +a
+    echo "[ENV] 載入 $ENV_FILE"
+else
+    echo "[WARN] $ENV_FILE 不存在，使用預設值"
+fi
+
+# 預設值
+SERVER_IP="${SERVER_IP:-127.0.0.1}"
+HERMES_HOST="${HERMES_HOST:-127.0.0.1}"
+HERMES_PORT="${HERMES_PORT:-8642}"
+
 echo "=== hermes-web 啟動腳本 ==="
+echo "[CONFIG] SERVER_IP=$SERVER_IP  HERMES_HOST=$HERMES_HOST  HERMES_PORT=$HERMES_PORT"
 
 # ── 1. FastAPI 後端 (port 8000) ──────────────────────────────────────
 if ss -tlnp | grep -q ":8000 "; then
     echo "[OK] FastAPI 後端已在運行 (port 8000)"
 else
     echo "[啟動] FastAPI 後端 (port 8000)..."
-    cd "$SCRIPT_DIR"
+    cd "$SCRIPT_DIR/backend"
     nohup python3 -m uvicorn main:app --reload --port 8000 --host 0.0.0.0 > "$LOG_DIR/fastapi.log" 2>&1 &
     sleep 3
     if ss -tlnp | grep -q ":8000 "; then
@@ -92,7 +119,14 @@ done
 
 echo ""
 echo "啟動完成！"
-echo "  前端: http://localhost:5173"
-echo "  API Server: http://localhost:8642"
-echo "  ws_chat_bridge: ws://localhost:8767"
+echo "  前端:    http://$SERVER_IP:5173"
+echo "  API:     http://$SERVER_IP:8000"
+echo "  ws_bridge: ws://$SERVER_IP:8767"
+echo "  Hermes:  http://$HERMES_HOST:$HERMES_PORT (僅限內部)"
 echo "  日誌目錄: $LOG_DIR"
+echo ""
+echo "【重要】請確認 UFW 防火牆已設定："
+echo "  sudo ufw allow 5173/tcp  # Vite 前端"
+echo "  sudo ufw allow 8000/tcp   # FastAPI 後端"
+echo "  sudo ufw allow 8767/tcp   # WebSocket Bridge"
+echo "  sudo ufw deny  8642/tcp   # Hermes API（必須禁止對外）"

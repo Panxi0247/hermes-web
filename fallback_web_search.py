@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """
 fallback_web_search.py
-多來源網路搜尋：依序嘗試各免費來源，任一成功即回傳，完全失敗才回報錯誤。
-來源順序：Google News RSS → Bing News RSS → DuckDuckGo HTML
+多來源網路搜尋：並行嘗試各免費來源，任一成功即回傳，完全失敗才回報錯誤。
+來源順序（僅用於日誌順序）：Google News RSS → Bing News RSS → DuckDuckGo HTML → Wikipedia
 
 用途：
   - ws_chat_bridge.py 的智慧推薦功能
-  - 或作為 Hermes Agent 的独立工具
+  - 或作為 Hermes Agent 的獨立工具
+
+並行優化（2026-06-04）：
+  - 四個 source 同時發起，先完成的就回傳（不用依序等待）
+  - 統一 timeout 6s，避免單一 source 過慢拖累整體
 """
+import asyncio
 import json
 import re
 import subprocess
@@ -16,88 +21,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from urllib.parse import quote, urlencode
 from typing import List, Dict, Optional
-
-# ─── 統一結果格式 ────────────────────────────────────────────────
-
-# ─── Source 4：Wikipedia 快速搜尋（curl + grep 關鍵字） ───────────
-
-def search_wikipedia(query: str, limit: int = 5) -> Optional[List[SearchResult]]:
-    """
-    用 curl 直接 GET Wikipedia 頁面，以關鍵字快速過濾感興趣的段落。
-    適用於：「甚麼是 XXX」、「XXX 的歷史」、「XXX 發明者/創辦人/時間」等問題。
-    """
-    try:
-        encoded = quote(query)
-        # 1. 用 OpenSearch API 取得相符的條目標題
-        search_url = (
-            f"https://en.wikipedia.org/w/api.php"
-            f"?action=opensearch&search={encoded}&limit=3&format=json"
-        )
-        search_result = subprocess.run(
-            ["curl", "-s", "--max-time", "8", search_url],
-            capture_output=True, text=True
-        )
-        try:
-            suggestions = json.loads(search_result.stdout)
-            titles = suggestions[1] if len(suggestions) > 1 else []
-        except Exception:
-            titles = []
-
-        if not titles:
-            return None
-
-        results = []
-        for title in titles[:2]:
-            article_url = f"https://en.wikipedia.org/wiki/{quote(title)}"
-
-            # 2. curl 抓取 HTML，用 Python 過濾含關鍵字的 <p> 段落
-            page_result = subprocess.run(
-                ["curl", "-s", "--max-time", "10", "-L", article_url],
-                capture_output=True, text=True
-            )
-            html = page_result.stdout
-            if len(html) < 500:
-                continue
-
-            # 抽出所有 <p> 並去除 HTML 標籤
-            paragraphs = re.findall(r'<p[^>]*>(.*?)</p>', html, re.DOTALL)
-            matched = []
-            for para in paragraphs[:20]:
-                text = re.sub(r'<[^>]+>', '', para).strip()
-                text = re.sub(r'\[.*?\]', '', text)
-                if len(text) > 40 and query.lower() in text.lower():
-                    matched.append(text)
-                if len(matched) >= limit:
-                    break
-
-            # 3. 若關鍵字沒配到，直接用前3段當摘要
-            if not matched:
-                for para in paragraphs[:3]:
-                    text = re.sub(r'<[^>]+>', '', para).strip()
-                    text = re.sub(r'\[.*?\]', '', text)
-                    if len(text) > 50:
-                        matched.append(text)
-                    if len(matched) >= 1:
-                        break
-
-            if matched:
-                snippet = matched[0][:300]
-                if len(matched[0]) > 300:
-                    snippet += "..."
-                results.append(SearchResult(
-                    title=title,
-                    url=article_url,
-                    snippet=snippet,
-                    source="Wikipedia",
-                ))
-                if len(results) >= 1:
-                    break
-
-        return results if results else None
-
-    except Exception:
-        return None
-
 
 # ─── 統一結果格式 ────────────────────────────────────────────────
 
@@ -118,22 +41,46 @@ class SearchResult:
             parts.append(f"（{self.source}）")
         return " ".join(parts)
 
+
+# ─── 通用異步 curl ───────────────────────────────────────────────
+
+async def curl_async(url: str, timeout: int = 6, headers: str = "") -> str:
+    """用 asyncio.subprocess 異步執行 curl（避免同步 subprocess 卡住事件循環）"""
+    cmd = ["curl", "-s", "--max-time", str(timeout), "-L", url]
+    if headers:
+        for h in headers.split("|"):
+            cmd += ["-H", h]
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout + 1)
+        return stdout.decode("utf-8", errors="ignore")
+    except asyncio.TimeoutError:
+        if proc:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        return ""
+    except Exception:
+        return ""
+
+
 # ─── Source 1：Google News RSS（最快、最準） ───────────────────────
 
-def search_google_news(query: str, limit: int = 10) -> Optional[List[SearchResult]]:
+async def search_google_news_async(query: str, limit: int = 10) -> Optional[List[SearchResult]]:
     """用 Google News RSS 搜尋，支援中英文"""
     try:
         encoded = quote(query)
-        # 英文介面拿到更多國際新聞
         rss_url = (
             f"https://news.google.com/rss/search"
             f"?q={encoded}&hl=en&gl=US&ceid=US:en"
         )
-        result = subprocess.run(
-            ["curl", "-s", "--max-time", "12", "-L", rss_url],
-            capture_output=True, text=True
-        )
-        xml_text = result.stdout
+        xml_text = await curl_async(rss_url, timeout=6)
         if not xml_text or len(xml_text) < 100:
             return None
 
@@ -160,7 +107,6 @@ def search_google_news(query: str, limit: int = 10) -> Optional[List[SearchResul
                     pass
 
             source = source_el.text.strip() if source_el is not None and source_el.text else ""
-            # 清理 Google News 重新導向 URL
             if link.startswith("https://news.google.com"):
                 link = re.sub(r'.*url=', '', link, count=1)
 
@@ -178,62 +124,18 @@ def search_google_news(query: str, limit: int = 10) -> Optional[List[SearchResul
         return None
 
 
-# ─── Source 2：DuckDuckGo HTML（無需 API Key） ─────────────────────
-
-def search_duckduckgo(query: str, limit: int = 10) -> Optional[List[SearchResult]]:
-    """用 DuckDuckGo HTML 頁面截圖新聞區塊"""
-    try:
-        encoded = quote(query)
-        url = f"https://html.duckduckgo.com/html/?q={encoded}+news"
-        result = subprocess.run(
-            ["curl", "-s", "--max-time", "12",
-             "-H", "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
-             url],
-            capture_output=True, text=True
-        )
-        html = result.stdout
-        if not html or "<html>" not in html.lower():
-            return None
-
-        results = []
-        # DuckDuckGo HTML 結果格式
-        for result_div in re.finditer(r'<a class="result__a" href="([^"]+)"[^>]*>(.*?)</a>', html, re.DOTALL):
-            link = result_div.group(1).strip()
-            title_html = result_div.group(2)
-            title = re.sub(r'<[^>]+>', '', title_html).strip()
-            if title and len(title) > 5:
-                results.append(SearchResult(title=title, url=link))
-            if len(results) >= limit:
-                break
-
-        # 沒有正則匹配時嘗試另一種格式
-        if not results:
-            for a_tag in re.finditer(r'<a[^>]+href="(https?://[^"]+)"[^>]*>(.*?)</a>', html, re.DOTALL):
-                link = a_tag.group(1)
-                title = re.sub(r'<[^>]+>', '', a_tag.group(2)).strip()
-                if title and len(title) > 10 and ("news" in link.lower() or "article" in link.lower()):
-                    results.append(SearchResult(title=title, url=link))
-                if len(results) >= limit:
-                    break
-
-        return results if results else None
-
-    except Exception:
-        return None
+def search_google_news(query: str, limit: int = 10) -> Optional[List[SearchResult]]:
+    return asyncio.run(search_google_news_async(query, limit))
 
 
-# ─── Source 3：Bing News RSS ──────────────────────────────────────
+# ─── Source 2：Bing News RSS ──────────────────────────────────────
 
-def search_bing_news(query: str, limit: int = 10) -> Optional[List[SearchResult]]:
+async def search_bing_news_async(query: str, limit: int = 10) -> Optional[List[SearchResult]]:
     """用 Bing News RSS 搜尋"""
     try:
         encoded = quote(query)
         rss_url = f"https://www.bing.com/news/search?q={encoded}&format=rss"
-        result = subprocess.run(
-            ["curl", "-s", "--max-time", "12", "-L", rss_url],
-            capture_output=True, text=True
-        )
-        xml_text = result.stdout
+        xml_text = await curl_async(rss_url, timeout=6)
         if not xml_text or len(xml_text) < 100:
             return None
 
@@ -249,7 +151,6 @@ def search_bing_news(query: str, limit: int = 10) -> Optional[List[SearchResult]
             if not raw_title:
                 continue
 
-            # 清理 CDATA
             raw_title = re.sub(r'<!\[CDATA\[(.*?)\]\]>', r'\1', raw_title)
             raw_title = re.sub(r'<[^>]+>', '', raw_title).strip()
 
@@ -280,50 +181,222 @@ def search_bing_news(query: str, limit: int = 10) -> Optional[List[SearchResult]
         return None
 
 
-# ─── 主程式：多來源降級搜尋 ───────────────────────────────────────
+def search_bing_news(query: str, limit: int = 10) -> Optional[List[SearchResult]]:
+    return asyncio.run(search_bing_news_async(query, limit))
 
-def web_search(query: str, limit: int = 10, verbose: bool = False) -> Dict:
+
+# ─── Source 3：DuckDuckGo HTML（無需 API Key） ─────────────────────
+
+async def search_duckduckgo_async(query: str, limit: int = 10) -> Optional[List[SearchResult]]:
+    """用 DuckDuckGo HTML 頁面截圖新聞區塊"""
+    try:
+        encoded = quote(query)
+        url = f"https://html.duckduckgo.com/html/?q={encoded}+news"
+        html = await curl_async(
+            url, timeout=6,
+            headers="User-Agent:Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+        )
+        if not html or "<html>" not in html.lower():
+            return None
+
+        results = []
+        for result_div in re.finditer(r'<a class="result__a" href="([^"]+)"[^>]*>(.*?)</a>', html, re.DOTALL):
+            link = result_div.group(1).strip()
+            title_html = result_div.group(2)
+            title = re.sub(r'<[^>]+>', '', title_html).strip()
+            if title and len(title) > 5:
+                results.append(SearchResult(title=title, url=link))
+            if len(results) >= limit:
+                break
+
+        if not results:
+            for a_tag in re.finditer(r'<a[^>]+href="(https?://[^"]+)"[^>]*>(.*?)</a>', html, re.DOTALL):
+                link = a_tag.group(1)
+                title = re.sub(r'<[^>]+>', '', a_tag.group(2)).strip()
+                if title and len(title) > 10 and ("news" in link.lower() or "article" in link.lower()):
+                    results.append(SearchResult(title=title, url=link))
+                if len(results) >= limit:
+                    break
+
+        return results if results else None
+
+    except Exception:
+        return None
+
+
+def search_duckduckgo(query: str, limit: int = 10) -> Optional[List[SearchResult]]:
+    return asyncio.run(search_duckduckgo_async(query, limit))
+
+
+# ─── Source 4：Wikipedia 快速搜尋（並行抓 OpenSearch + 文章） ───────
+
+async def search_wikipedia_async(query: str, limit: int = 5) -> Optional[List[SearchResult]]:
     """
-    多來源依序搜尋，任一成功就回傳。
+    用 curl 直接 GET Wikipedia 頁面，以關鍵字快速過濾感興趣的段落。
+    適用於：「甚麼是 XXX」、「XXX 的歷史」等問題。
+    """
+    try:
+        encoded = quote(query)
+        # 1. 用 OpenSearch API 取得相符的條目標題（限 2 個）
+        search_url = (
+            f"https://en.wikipedia.org/w/api.php"
+            f"?action=opensearch&search={encoded}&limit=2&format=json"
+        )
+        raw = await curl_async(search_url, timeout=6)
+        try:
+            suggestions = json.loads(raw)
+            titles = suggestions[1] if len(suggestions) > 1 else []
+        except Exception:
+            titles = []
 
-    參數：
-        query  - 搜尋關鍵字
-        limit  - 最多回傳結果數（預設 10）
-        verbose - 顯示嘗試了哪些來源
+        if not titles:
+            return None
 
-    回傳：
-        {
-            "source": "google_news" | "bing_news" | "duckduckgo" | "none",
-            "results": [SearchResult, ...],
-            "error": None | "所有來源都失敗"
-        }
+        # 2. 同時抓所有候選文章頁面（並行，timeout 6s 總限制）
+        async def fetch_article(title: str) -> Optional[SearchResult]:
+            article_url = f"https://en.wikipedia.org/wiki/{quote(title)}"
+            html = await curl_async(article_url, timeout=6)
+            if len(html) < 500:
+                return None
+
+            paragraphs = re.findall(r'<p[^>]*>(.*?)</p>', html, re.DOTALL)
+            matched = []
+            for para in paragraphs[:15]:
+                text = re.sub(r'<[^>]+>', '', para).strip()
+                text = re.sub(r'\[.*?\]', '', text)
+                if len(text) > 40 and query.lower() in text.lower():
+                    matched.append(text)
+                if len(matched) >= limit:
+                    break
+
+            # 若關鍵字沒配到，直接用前2段當摘要
+            if not matched:
+                for para in paragraphs[:2]:
+                    text = re.sub(r'<[^>]+>', '', para).strip()
+                    text = re.sub(r'\[.*?\]', '', text)
+                    if len(text) > 50:
+                        matched.append(text)
+                    if len(matched) >= 1:
+                        break
+
+            if matched:
+                snippet = matched[0][:300]
+                if len(matched[0]) > 300:
+                    snippet += "..."
+                return SearchResult(
+                    title=title,
+                    url=article_url,
+                    snippet=snippet,
+                    source="Wikipedia",
+                )
+            return None
+
+        # 同時發起所有文章的請求，誰先成功誰先贏
+        tasks = [fetch_article(t) for t in titles[:2]]
+        done, pending = await asyncio.wait(
+            [asyncio.create_task(t) for t in tasks],
+            timeout=6,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for t in pending:
+            t.cancel()
+
+        for t in done:
+            try:
+                result = t.result()
+                if result:
+                    return [result]
+            except Exception:
+                pass
+
+        return None
+
+    except Exception:
+        return None
+
+
+def search_wikipedia(query: str, limit: int = 5) -> Optional[List[SearchResult]]:
+    return asyncio.run(search_wikipedia_async(query, limit))
+
+
+# ─── 主程式：並行多來源搜尋（核心優化） ─────────────────────────
+
+async def web_search_async(query: str, limit: int = 10, verbose: bool = False) -> Dict:
+    """
+    四個 source 同時發起，先完成就回傳（不等其餘）。
+    全部超時 / 失敗才回 error。
     """
     sources = [
-        ("google_news", search_google_news),
-        ("bing_news",    search_bing_news),
-        ("duckduckgo",   search_duckduckgo),
-        ("wikipedia",    search_wikipedia),
+        ("google_news",  search_google_news_async),
+        ("bing_news",     search_bing_news_async),
+        ("duckduckgo",    search_duckduckgo_async),
+        ("wikipedia",     search_wikipedia_async),
     ]
 
-    for name, fn in sources:
+    # 同時發起所有搜尋任務
+    async def try_source(name: str, fn, q: str, lim: int):
         if verbose:
             print(f"[fallback_search] 嘗試：{name}", flush=True)
-
-        results = fn(query, limit)
-        if results:
+        try:
+            result = await asyncio.wait_for(fn(q, lim), timeout=6)
+            if result:
+                if verbose:
+                    print(f"[fallback_search] 成功：{name}，拿到 {len(result)} 筆", flush=True)
+                return (name, result)
+        except asyncio.TimeoutError:
             if verbose:
-                print(f"[fallback_search] 成功：{name}，拿到 {len(results)} 筆", flush=True)
-            return {
-                "source": name,
-                "results": results,
-                "error": None,
-            }
+                print(f"[fallback_search] {name} timeout", flush=True)
+        except Exception as e:
+            if verbose:
+                print(f"[fallback_search] {name} error: {e}", flush=True)
+        return (None, None)
+
+    # 建立所有 task
+    tasks = [try_source(name, fn, query, limit) for name, fn in sources]
+    pending = {asyncio.create_task(t): name for t, (name, _) in zip(tasks, sources)}
+
+    winner_name: str | None = None
+    winner_results: list | None = None
+
+    # 等第一個完成（成功或失敗）
+    done, pending = await asyncio.wait(
+        pending.keys(),
+        timeout=7,  # 總 timeout 比各 source 的 6s 稍長，確保起碼有一個完成
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+
+    for t in done:
+        name, results = t.result()
+        if name and results:
+            winner_name = name
+            winner_results = results
+            break
+
+    # Cancel 剩餘 pending tasks
+    for t in pending:
+        t.cancel()
+        try:
+            await asyncio.wait_for(t, timeout=0.5)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+
+    if winner_name and winner_results:
+        return {
+            "source": winner_name,
+            "results": winner_results,
+            "error": None,
+        }
 
     return {
         "source": "none",
         "results": [],
-        "error": "所有來源（Google News、Bing News、DuckDuckGo）都失敗",
+        "error": "所有來源（Google News、Bing News、DuckDuckGo、Wikipedia）都失敗",
     }
+
+
+def web_search(query: str, limit: int = 10, verbose: bool = False) -> Dict:
+    """同步包裝，並行搜尋（asyncio.run 每次建立新事件循環，overhead 可忽略）"""
+    return asyncio.run(web_search_async(query, limit, verbose))
 
 
 def web_search_to_string(query: str, limit: int = 10, verbose: bool = False) -> str:

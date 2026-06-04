@@ -1,9 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-
-type Message = {
-  role: "system" | "user" | "assistant";
-  content: string;
-};
+import type { Message } from "../types";
 
 interface ChatProps {
   onError: (msg: string) => void;
@@ -101,10 +97,15 @@ export default function Chat({ onError, messages, onMessagesChange }: ChatProps)
 
   return (
     <div className="chat-container">
-      {/* 連線狀態指示 */}
-      <div className={`ws-status ${connected ? "connected" : "disconnected"}`}>
-        <span className="ws-dot" />
-        {connected ? "已連接" : "連線中..."}
+      <div className="chat-header">
+        <div>
+          <p className="eyebrow">Chat</p>
+          <h2>Hermes 對話</h2>
+        </div>
+        <div className={`ws-status ${connected ? "connected" : "disconnected"}`}>
+          <span className="ws-dot" />
+          {connected ? "已連接" : "連線中..."}
+        </div>
       </div>
 
       <div className="messages">

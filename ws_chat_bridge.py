@@ -7,6 +7,7 @@ WebSocket → Hermes REST API (streaming SSE)
 """
 import asyncio
 import json
+import os
 import re
 import subprocess
 import sys
@@ -19,9 +20,9 @@ from urllib.parse import quote
 from fallback_web_search import web_search_to_string as fallback_search_to_string
 from fallback_web_search import SearchResult
 
-HERMES_HOST = "127.0.0.1"
-HERMES_PORT = 8642
-WS_PORT = 8767
+HERMES_HOST = os.getenv("HERMES_HOST", "127.0.0.1")
+HERMES_PORT = int(os.getenv("HERMES_PORT", "8642"))
+WS_PORT = int(os.getenv("WS_PORT", "8767"))
 
 
 # ─── 通用意圖偵測：是否為推薦資訊類查詢 ───

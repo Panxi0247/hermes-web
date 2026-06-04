@@ -1,14 +1,17 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
+import type { SetStateAction } from "react";
 import "./App.css";
 import Chat from "./components/Chat";
 import ChatHistory from "./components/ChatHistory";
 import Schedule from "./components/Schedule";
 import { healthCheck } from "./api/chat";
-
-type Message = {
-  role: "system" | "user" | "assistant";
-  content: string;
-};
+import type { Conversation, Message } from "./types";
+import {
+  getWelcomeMessages,
+  loadConversations,
+  saveConversations,
+  upsertConversation,
+} from "./storage/conversations";
 
 // page: 頁面導航（對應左側導覽列）
 type Page = "schedule" | "chat" | "settings" | "history";
@@ -17,9 +20,10 @@ export default function App() {
   const [page, setPage] = useState<Page>("schedule");
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [chatMessages, setChatMessages] = useState<Message[]>([
-    { role: "assistant", content: "嗨！我是你的行程助理，有什麼可以幫你的？" },
-  ]);
+  const [chatMessages, setChatMessages] = useState<Message[]>(getWelcomeMessages);
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [conversations, setConversations] = useState<Conversation[]>(loadConversations);
+  const conversationIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     const check = async () => {
@@ -31,14 +35,62 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
+  const persistMessages = (messages: Message[]) => {
+    if (messages.length <= 1) return;
+
+    setConversations((previous) => {
+      const result = upsertConversation(previous, messages, conversationIdRef.current);
+      saveConversations(result.conversations);
+
+      if (!conversationIdRef.current) {
+        conversationIdRef.current = result.conversationId;
+        setConversationId(result.conversationId);
+      }
+
+      return result.conversations;
+    });
+  };
+
+  const handleMessagesChange = (nextMessages: SetStateAction<Message[]>) => {
+    setChatMessages((previous) => {
+      const resolvedMessages =
+        typeof nextMessages === "function" ? nextMessages(previous) : nextMessages;
+      queueMicrotask(() => persistMessages(resolvedMessages));
+      return resolvedMessages;
+    });
+  };
+
   const showError = (msg: string) => {
     setError(msg);
     setTimeout(() => setError(null), 5000);
   };
 
-  const handleLoadConversation = (messages: Message[]) => {
-    setChatMessages(messages);
+  const handleLoadConversation = (conversation: Conversation) => {
+    conversationIdRef.current = conversation.id;
+    setConversationId(conversation.id);
+    setChatMessages(conversation.messages);
     setPage("chat");
+  };
+
+  const handleNewConversation = () => {
+    conversationIdRef.current = null;
+    setConversationId(null);
+    setChatMessages(getWelcomeMessages());
+    setPage("chat");
+  };
+
+  const handleDeleteConversation = (id: string) => {
+    setConversations((previous) => {
+      const next = previous.filter((conversation) => conversation.id !== id);
+      saveConversations(next);
+      return next;
+    });
+
+    if (conversationId === id) {
+      conversationIdRef.current = null;
+      setConversationId(null);
+      setChatMessages(getWelcomeMessages());
+    }
   };
 
   return (
@@ -105,7 +157,7 @@ export default function App() {
           <Chat
             onError={showError}
             messages={chatMessages}
-            onMessagesChange={setChatMessages}
+            onMessagesChange={handleMessagesChange}
           />
         )}
         {page === "settings" && (
@@ -113,8 +165,10 @@ export default function App() {
         )}
         {page === "history" && (
           <ChatHistory
+            conversations={conversations}
             onLoadConversation={handleLoadConversation}
-            currentMessages={chatMessages}
+            onNewConversation={handleNewConversation}
+            onDeleteConversation={handleDeleteConversation}
           />
         )}
       </main>

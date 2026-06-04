@@ -1,0 +1,68 @@
+hermes-web 啟動腳本說明
+========================
+
+【首次設定】
+
+1. 複製環境變數範本
+   cd /mnt/c/Users/user/Desktop/hermes-web
+   cp .env.example .env
+
+2. 編輯 .env，填入實際值
+   SERVER_IP=你的伺服器IP
+   例如：SERVER_IP=192.168.1.100
+
+【啟動】
+
+   ./start.sh
+
+或
+
+   bash start.sh
+
+【停止】
+
+所有服務都是背景執行，直接關閉終端機即可。
+如需個別停止：
+
+   pkill -f "uvicorn main:app"
+   pkill -f "npm run dev"
+   pkill -f "hermes gateway"
+   pkill -f "ws_chat_bridge"
+
+【查看日誌】
+
+   cat logs/fastapi.log
+   cat logs/vite.log
+   cat logs/hermes.log
+   cat logs/ws_bridge.log
+
+【檢查服務狀態】
+
+   ss -tlnp | grep -E "5173|8000|8642|8767"
+
+  正常輸出：
+    0.0.0.0:5173   → Vite 前端（對外）
+    0.0.0.0:8000   → FastAPI 後端（對外）
+    127.0.0.1:8642 → Hermes API（僅內部）
+    0.0.0.0:8767   → ws_chat_bridge（對外）
+
+【防火牆設定（部署用）】
+
+僅限對外暴露：5173、8000、8767
+8642 必須禁止對外，否則繞過所有認證直接存取 LLM
+
+   sudo ufw allow 5173/tcp
+   sudo ufw allow 8000/tcp
+   sudo ufw allow 8767/tcp
+   sudo ufw deny  8642/tcp
+
+【常見問題】
+
+Q: ./start.sh 顯示權限不足
+A: chmod +x start.sh
+
+Q: start.sh 一直顯示 [錯誤]
+A: 檢查 logs/ 目錄下的 *.log 檔案看錯誤原因
+
+Q: 其他電腦/手機連不上
+A: 確認 .env 的 SERVER_IP 已填入正確的 LAN IP，並確認 UFW 防火牆已設定
