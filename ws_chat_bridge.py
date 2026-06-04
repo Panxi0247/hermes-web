@@ -15,6 +15,10 @@ import httpx
 from datetime import datetime
 from urllib.parse import quote
 
+# 多來源網路搜尋（Google News → Bing News → DuckDuckGo，自動降級）
+from fallback_web_search import web_search_to_string as fallback_search_to_string
+from fallback_web_search import SearchResult
+
 HERMES_HOST = "127.0.0.1"
 HERMES_PORT = 8642
 WS_PORT = 8767
@@ -82,62 +86,13 @@ def extract_topic_keywords(user_message: str) -> str:
     return " ".join(all_keywords[:5])
 
 
-# ─── 新聞推薦：curl Google News RSS 搜尋 ───
+# ─── 新聞推薦：多來源降級搜尋 ───────────────────────────────────
 
 def fetch_news_for_topic(keywords: str) -> str:
-    """用 curl + Google News RSS 拿指定主題的新聞"""
+    """用 fallback_web_search 多來源降級拿新聞（Google → Bing → DuckDuckGo）"""
     if not keywords.strip():
         return ""
-
-    try:
-        encoded = quote(keywords)
-        rss_url = (
-            f"https://news.google.com/rss/search"
-            f"?q={encoded}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
-        )
-        result = subprocess.run(
-            ["curl", "-s", "--max-time", "12", rss_url],
-            capture_output=True, text=True
-        )
-        xml = result.stdout
-
-        items = re.findall(r'<item>(.*?)</item>', xml, re.DOTALL)
-        if not items:
-            return ""
-
-        news_list = []
-        for item in items[:12]:
-            title_m = re.search(r'<title><!\[CDATA\[(.*?)\]\]></title>', item)
-            if not title_m:
-                title_m = re.search(r'<title>(.*?)</title>', item)
-            date_m = re.search(r'<pubDate>(.*?)</pubDate>', item)
-            source_m = re.search(r'<source>(.*?)</source>', item)
-
-            title = title_m.group(1).strip() if title_m else "無標題"
-            title = re.sub(r'<[^>]+>', '', title)
-
-            date_raw = date_m.group(1).strip() if date_m else ""
-            try:
-                dt_obj = datetime.strptime(date_raw, "%a, %d %b %Y %H:%M:%S GMT")
-                date_str = dt_obj.strftime("%m/%d %H:%M")
-            except ValueError:
-                date_str = ""
-
-            source = source_m.group(1).strip() if source_m else ""
-            if source:
-                news_list.append(f"[{date_str}] {title}（{source}）")
-            else:
-                news_list.append(f"[{date_str}] {title}")
-
-        if not news_list:
-            return ""
-
-        now_str = datetime.now().strftime("%Y年%m月%d日 %H:%M")
-        lines = [f"📰 「{keywords}」相關新聞（Google News，{now_str}）\n"]
-        lines.extend(news_list)
-        return "\n".join(lines)
-    except Exception as e:
-        return f"[新聞抓取失敗: {e}]"
+    return fallback_search_to_string(keywords, limit=12, verbose=False)
 
 
 # ─── 維基百科條目 ───
