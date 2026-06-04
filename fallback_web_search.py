@@ -8,6 +8,7 @@ fallback_web_search.py
   - ws_chat_bridge.py 的智慧推薦功能
   - 或作為 Hermes Agent 的独立工具
 """
+import json
 import re
 import subprocess
 import xml.etree.ElementTree as ET
@@ -18,10 +19,92 @@ from typing import List, Dict, Optional
 
 # ─── 統一結果格式 ────────────────────────────────────────────────
 
+# ─── Source 4：Wikipedia 快速搜尋（curl + grep 關鍵字） ───────────
+
+def search_wikipedia(query: str, limit: int = 5) -> Optional[List[SearchResult]]:
+    """
+    用 curl 直接 GET Wikipedia 頁面，以關鍵字快速過濾感興趣的段落。
+    適用於：「甚麼是 XXX」、「XXX 的歷史」、「XXX 發明者/創辦人/時間」等問題。
+    """
+    try:
+        encoded = quote(query)
+        # 1. 用 OpenSearch API 取得相符的條目標題
+        search_url = (
+            f"https://en.wikipedia.org/w/api.php"
+            f"?action=opensearch&search={encoded}&limit=3&format=json"
+        )
+        search_result = subprocess.run(
+            ["curl", "-s", "--max-time", "8", search_url],
+            capture_output=True, text=True
+        )
+        try:
+            suggestions = json.loads(search_result.stdout)
+            titles = suggestions[1] if len(suggestions) > 1 else []
+        except Exception:
+            titles = []
+
+        if not titles:
+            return None
+
+        results = []
+        for title in titles[:2]:
+            article_url = f"https://en.wikipedia.org/wiki/{quote(title)}"
+
+            # 2. curl 抓取 HTML，用 Python 過濾含關鍵字的 <p> 段落
+            page_result = subprocess.run(
+                ["curl", "-s", "--max-time", "10", "-L", article_url],
+                capture_output=True, text=True
+            )
+            html = page_result.stdout
+            if len(html) < 500:
+                continue
+
+            # 抽出所有 <p> 並去除 HTML 標籤
+            paragraphs = re.findall(r'<p[^>]*>(.*?)</p>', html, re.DOTALL)
+            matched = []
+            for para in paragraphs[:20]:
+                text = re.sub(r'<[^>]+>', '', para).strip()
+                text = re.sub(r'\[.*?\]', '', text)
+                if len(text) > 40 and query.lower() in text.lower():
+                    matched.append(text)
+                if len(matched) >= limit:
+                    break
+
+            # 3. 若關鍵字沒配到，直接用前3段當摘要
+            if not matched:
+                for para in paragraphs[:3]:
+                    text = re.sub(r'<[^>]+>', '', para).strip()
+                    text = re.sub(r'\[.*?\]', '', text)
+                    if len(text) > 50:
+                        matched.append(text)
+                    if len(matched) >= 1:
+                        break
+
+            if matched:
+                snippet = matched[0][:300]
+                if len(matched[0]) > 300:
+                    snippet += "..."
+                results.append(SearchResult(
+                    title=title,
+                    url=article_url,
+                    snippet=snippet,
+                    source="Wikipedia",
+                ))
+                if len(results) >= 1:
+                    break
+
+        return results if results else None
+
+    except Exception:
+        return None
+
+
+# ─── 統一結果格式 ────────────────────────────────────────────────
+
 @dataclass
 class SearchResult:
     title: str
-    url: str
+    url: str = ""
     source: str = ""
     date: str = ""
     snippet: str = ""
@@ -34,7 +117,6 @@ class SearchResult:
         if self.source:
             parts.append(f"（{self.source}）")
         return " ".join(parts)
-
 
 # ─── Source 1：Google News RSS（最快、最準） ───────────────────────
 
@@ -220,6 +302,7 @@ def web_search(query: str, limit: int = 10, verbose: bool = False) -> Dict:
         ("google_news", search_google_news),
         ("bing_news",    search_bing_news),
         ("duckduckgo",   search_duckduckgo),
+        ("wikipedia",    search_wikipedia),
     ]
 
     for name, fn in sources:
@@ -256,6 +339,7 @@ def web_search_to_string(query: str, limit: int = 10, verbose: bool = False) -> 
         "google_news": "Google News",
         "bing_news": "Bing News",
         "duckduckgo": "DuckDuckGo",
+        "wikipedia": "Wikipedia",
     }
     source_label = source_labels.get(data["source"], data["source"])
     now_str = datetime.now().strftime("%Y年%m月%d日 %H:%M")
