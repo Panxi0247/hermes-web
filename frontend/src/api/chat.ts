@@ -1,4 +1,5 @@
-const API_BASE = "";
+// API URL：讀取環境變數，生產部署時改為伺服器 IP:Port
+const API_BASE = import.meta.env.VITE_API_URL || "";
 
 export type Message = {
   role: "system" | "user" | "assistant";

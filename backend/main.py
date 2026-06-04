@@ -30,13 +30,18 @@ ALLOWED_COMMANDS = {
 # FastAPI app
 app = FastAPI(title="Hermes Web Backend", version="1.0.0")
 
-# CORS - allow frontend dev server
+# CORS - 允許前端跨域請求，來源由環境變數控制
+# FRONTEND_ORIGIN 格式如：http://192.168.1.100:5173
+FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")
+ALLOWED_ORIGINS = [
+    FRONTEND_ORIGIN,
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

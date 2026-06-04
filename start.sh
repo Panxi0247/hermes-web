@@ -1,44 +1,98 @@
 #!/bin/bash
-# hermes-web 一鍵啟動腳本
+# hermes-web 啟動腳本
+# 啟動所有必要服務：FastAPI後端 + Vite前端 + Hermes API Server + WebSocket Bridge
 
-echo "=== Hermes Web 啟動腳本 ==="
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WS_BRIDGE="$SCRIPT_DIR/ws_chat_bridge.py"
+LOG_DIR="$SCRIPT_DIR/logs"
+mkdir -p "$LOG_DIR"
+
+# hermes CLI 完整路徑
+HERMES_BIN="/home/fu/.local/bin/hermes"
+
+echo "=== hermes-web 啟動腳本 ==="
+
+# ── 1. FastAPI 後端 (port 8000) ──────────────────────────────────────
+if ss -tlnp | grep -q ":8000 "; then
+    echo "[OK] FastAPI 後端已在運行 (port 8000)"
+else
+    echo "[啟動] FastAPI 後端 (port 8000)..."
+    cd "$SCRIPT_DIR"
+    nohup python3 -m uvicorn main:app --reload --port 8000 --host 0.0.0.0 > "$LOG_DIR/fastapi.log" 2>&1 &
+    sleep 3
+    if ss -tlnp | grep -q ":8000 "; then
+        echo "[OK] FastAPI 後端啟動成功 (port 8000)"
+    else
+        echo "[錯誤] FastAPI 後端啟動失敗"
+    fi
+fi
+
+# ── 2. Vite 前端 (port 5173) ─────────────────────────────────────────
+if ss -tlnp | grep -q ":5173 "; then
+    echo "[OK] Vite 前端已在運行 (port 5173)"
+else
+    echo "[啟動] Vite 前端 (port 5173)..."
+    cd "$SCRIPT_DIR/frontend"
+    nohup npm run dev > "$LOG_DIR/vite.log" 2>&1 &
+    sleep 5
+    if ss -tlnp | grep -q ":5173 "; then
+        echo "[OK] Vite 前端啟動成功 (port 5173)"
+    else
+        echo "[錯誤] Vite 前端啟動失敗"
+    fi
+fi
+
+# ── 3. Hermes Gateway / API Server (port 8642) ──────────────────────
+if ss -tlnp | grep -q ":8642 "; then
+    echo "[OK] Hermes API Server 已在運行 (port 8642)"
+else
+    echo "[啟動] Hermes API Server (port 8642)..."
+    cd "$SCRIPT_DIR"
+    setsid "$HERMES_BIN" gateway run --quiet > "$LOG_DIR/hermes.log" 2>&1 &
+    # 等待啟動（最多20秒）
+    for i in $(seq 1 20); do
+        if ss -tlnp | grep -q ":8642 "; then
+            echo "[OK] Hermes API Server 啟動成功 (port 8642)"
+            break
+        fi
+        sleep 1
+    done
+    if ! ss -tlnp | grep -q ":8642 "; then
+        echo "[錯誤] Hermes API Server 啟動失敗"
+    fi
+fi
+
+# ── 4. WebSocket Chat Bridge (port 8767) ────────────────────────────
+if ss -tlnp | grep -q ":8767 "; then
+    echo "[OK] ws_chat_bridge 已在運行 (port 8767)"
+else
+    echo "[啟動] ws_chat_bridge (port 8767)..."
+    cd "$SCRIPT_DIR"
+    nohup python3 "$WS_BRIDGE" > "$LOG_DIR/ws_bridge.log" 2>&1 &
+    sleep 2
+    if ss -tlnp | grep -q ":8767 "; then
+        echo "[OK] ws_chat_bridge 啟動成功 (port 8767)"
+    else
+        echo "[錯誤] ws_chat_bridge 啟動失敗"
+    fi
+fi
+
+# ── 驗證狀態 ────────────────────────────────────────────────────────
 echo ""
-
-# 清理現有服務
-echo "[1/3] 清理現有服務..."
-pkill -f "uvicorn" 2>/dev/null
-pkill -f "hermes" 2>/dev/null
-sleep 1
-
-# 啟動 Hermes API Server
-echo "[2/3] 啟動 Hermes API Server (port 8642)..."
-hermes run &
-sleep 2
-
-# 啟動 hermes-web Backend
-echo "[3/3] 啟動 Backend (port 8000)..."
-(cd /mnt/c/Users/user/Desktop/hermes-web/backend && python3 -m uvicorn main:app --reload --port 8000 --host 0.0.0.0) &
-sleep 2
-
-# 啟動 hermes-web Frontend
-cd /mnt/c/Users/user/Desktop/hermes-web/frontend
-nohup npm run dev > /tmp/hermes-web-frontend.log 2>&1 &
-sleep 3
-
-# 驗證
-echo ""
-echo "=== 驗證服務狀態 ==="
-echo -n "Hermes API (8642): "
-curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8642/health
-
-echo -n "Backend (8000):     "
-curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8000
-
-echo -n "Frontend (5173):    "
-curl -s -o /dev/null -w "%{http_code}\n" http://localhost:5173
+echo "=== 服務狀態 ==="
+for port in 8000 5173 8642 8767; do
+    if ss -tlnp | grep -q ":$port "; then
+        echo "  port $port  ✅"
+    else
+        echo "  port $port  ❌"
+    fi
+done
 
 echo ""
-echo "=== 啟動完成 ==="
-echo "Frontend: http://localhost:5173"
-echo "Backend:  http://localhost:8000"
-echo "Hermes:   http://127.0.0.1:8642"
+echo "啟動完成！"
+echo "  前端: http://localhost:5173"
+echo "  API Server: http://localhost:8642"
+echo "  ws_chat_bridge: ws://localhost:8767"
+echo "  日誌目錄: $LOG_DIR"

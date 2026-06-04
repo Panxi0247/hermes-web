@@ -11,7 +11,9 @@ interface ChatProps {
   onMessagesChange: (msgs: Message[] | ((prev: Message[]) => Message[])) => void;
 }
 
-const WS_URL = "ws://localhost:8767";
+// WebSocket URL：讀取環境變數（Vite 會把 VITE_ 前綴的變數注入）
+// 開發時預設 localhost，生產部署時改為伺服器 IP 或網域名稱
+const WS_URL = import.meta.env.VITE_WS_URL || "ws://localhost:8767";
 
 export default function Chat({ onError, messages, onMessagesChange }: ChatProps) {
   const [input, setInput] = useState("");
