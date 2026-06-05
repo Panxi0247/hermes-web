@@ -5,13 +5,14 @@ interface ChatProps {
   onError: (msg: string) => void;
   messages: Message[];
   onMessagesChange: (msgs: Message[] | ((prev: Message[]) => Message[])) => void;
+  onWsConnectedChange: (connected: boolean) => void;
 }
 
 // WebSocket URL：讀取環境變數（Vite 會把 VITE_ 前綴的變數注入）
 // 開發時預設 localhost，生產部署時改為伺服器 IP 或網域名稱
 const WS_URL = import.meta.env.VITE_WS_URL || "ws://localhost:8767";
 
-export default function Chat({ onError, messages, onMessagesChange }: ChatProps) {
+export default function Chat({ onError, messages, onMessagesChange, onWsConnectedChange }: ChatProps) {
   const [input, setInput] = useState("");
   const [connected, setConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
@@ -32,9 +33,13 @@ export default function Chat({ onError, messages, onMessagesChange }: ChatProps)
       ws = new WebSocket(WS_URL);
       wsRef.current = ws;
 
-      ws.onopen = () => setConnected(true);
+      ws.onopen = () => {
+        setConnected(true);
+        onWsConnectedChange(true);
+      };
       ws.onclose = () => {
         setConnected(false);
+        onWsConnectedChange(false);
         if (!closed) setTimeout(connect, 3000);
       };
       ws.onerror = () => {
@@ -55,6 +60,12 @@ export default function Chat({ onError, messages, onMessagesChange }: ChatProps)
               }
               return updated;
             });
+          } else if (data.type === "search_result" && data.content) {
+            // 搜尋結果直接顯示為助手訊息
+            onMessagesChange((prev) => [
+              ...prev,
+              { role: "assistant", content: data.content },
+            ]);
           }
         } catch {
           // ignore parse errors

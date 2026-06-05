@@ -1,6 +1,6 @@
 export type EventTone = "IP1" | "IP2" | "IP3" | "IP4";
 export type EventPriority = "low" | "medium" | "high";
-export type ScheduleView = "agenda" | "calendar";
+export type ScheduleView = "agenda" | "calendar" | "week";
 
 export type Participant = {
   id: string;

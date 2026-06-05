@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import "./Schedule.css";
 import AgendaList from "./schedule/AgendaList";
 import CalendarView from "./schedule/CalendarView";
+import WeekView from "./schedule/WeekView";
 import DetailPanel from "./schedule/DetailPanel";
 import EventModal from "./schedule/EventModal";
 import { useScheduleEvents } from "./schedule/useScheduleEvents";
@@ -101,8 +102,9 @@ export default function Schedule() {
 
         <div className="schedule-controls">
           <div className="view-switch">
-            <button className={view === "calendar" ? "active" : ""} onClick={() => setView("calendar")}>月</button>
-            <button className={view === "agenda" ? "active" : ""} onClick={() => setView("agenda")}>列表</button>
+            <button className={view === "calendar" ? "active" : ""} onClick={() => setView("calendar")}>Month</button>
+            <button className={view === "week" ? "active" : ""} onClick={() => setView("week")}>Week</button>
+            <button className={view === "agenda" ? "active" : ""} onClick={() => setView("agenda")}>Schedule</button>
           </div>
           <div className="month-control">
             <button onClick={() => setCurrentDate(new Date(currentYear, currentDate.getMonth() - 1, 1))}>‹</button>
@@ -114,6 +116,16 @@ export default function Schedule() {
         {view === "calendar" ? (
           <CalendarView
             calendarDays={calendarDays}
+            eventsForDay={(day) => eventsByDay.get(day) ?? []}
+            isToday={(day) => isTodayDate(day, currentMonth, currentYear)}
+            onSelectDay={selectFirstEventForDay}
+            onSelectEvent={setSelectedEventId}
+          />
+        ) : view === "week" ? (
+          <WeekView
+            year={currentYear}
+            month={currentMonth}
+            date={currentDate.getDate()}
             eventsForDay={(day) => eventsByDay.get(day) ?? []}
             isToday={(day) => isTodayDate(day, currentMonth, currentYear)}
             onSelectDay={selectFirstEventForDay}

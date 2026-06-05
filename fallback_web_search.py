@@ -21,6 +21,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from urllib.parse import quote, urlencode
 from typing import List, Dict, Optional
+import os
+
+# ─── Jina API Key（環境變數，安全性） ───────────────────────────────
+JINA_API_KEY = os.environ.get(
+    "JINA_API_KEY",
+    "jina_3f0df340406040fda49e652b3c47f317Ha9jMwzARV1XS1r_GbZfijWx_vUo"
+)
 
 # ─── 統一結果格式 ────────────────────────────────────────────────
 
@@ -70,7 +77,81 @@ async def curl_async(url: str, timeout: int = 6, headers: str = "") -> str:
         return ""
 
 
-# ─── Source 1：Google News RSS（最快、最準） ───────────────────────
+# ─── Source 1：Jina Search API（最高優先） ──────────────────────────
+
+async def search_jina_async(query: str, limit: int = 10) -> Optional[List[SearchResult]]:
+    """用 Jina AI 搜尋端點（s.jina.ai/search），需要 API key"""
+    try:
+        url = f"https://s.jina.ai/search?q={quote(query)}&num={limit}"
+        text = await curl_async(
+            url,
+            timeout=8,
+            headers=f"Authorization: Bearer {JINA_API_KEY}"
+        )
+        if not text or len(text) < 50:
+            return None
+
+        # Jina 搜尋返回格式（Markdown）：
+        # [1] Title: 標題
+        # [1] URL Source: https://...
+        # [1] Description: 描述文字
+        #
+        # # 標題內容（頁面內容）
+        results = []
+        idx = 0  # 當前結果 index（1,2,3...）
+
+        lines = text.split("\n")
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            # 匹配 [N] Title: / URL Source: / Description:
+            m = re.match(r'\[(\d+)\]\s+(Title|URL Source|Description):\s*(.*)', line)
+            if m:
+                num = int(m.group(1))
+                tag = m.group(2)
+                val = m.group(3).strip()
+
+                if tag == "Title":
+                    # 新結果開始，先存前一筆
+                    if idx > 0 and len(results) < num - 1:
+                        results.append(SearchResult(
+                            title=f"結果{idx}",
+                            url="",
+                            source="jina",
+                            snippet=""
+                        ))
+                    idx = num
+                    # 建立新 result 的框架
+                    if num > len(results):
+                        results.append(SearchResult(
+                            title=val,
+                            url="",
+                            source="jina",
+                            snippet=""
+                        ))
+                    else:
+                        results[num - 1].title = val
+                elif tag == "URL Source":
+                    if num <= len(results):
+                        results[num - 1].url = val
+                elif tag == "Description":
+                    if num <= len(results):
+                        results[num - 1].snippet = val[:200]
+            i += 1
+
+        # 過濾掉無 title 的結果
+        valid_results = [r for r in results if r.title and r.title.strip()]
+        return valid_results[:limit] if valid_results else None
+
+    except Exception:
+        return None
+
+
+def search_jina(query: str, limit: int = 10) -> Optional[List[SearchResult]]:
+    return asyncio.run(search_jina_async(query, limit))
+
+
+# ─── Source 2：Google News RSS（最快、最準） ───────────────────────
 
 async def search_google_news_async(query: str, limit: int = 10) -> Optional[List[SearchResult]]:
     """用 Google News RSS 搜尋，支援中英文"""
@@ -78,7 +159,7 @@ async def search_google_news_async(query: str, limit: int = 10) -> Optional[List
         encoded = quote(query)
         rss_url = (
             f"https://news.google.com/rss/search"
-            f"?q={encoded}&hl=en&gl=US&ceid=US:en"
+            f"?q={encoded}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
         )
         xml_text = await curl_async(rss_url, timeout=6)
         if not xml_text or len(xml_text) < 100:
@@ -327,10 +408,11 @@ async def web_search_async(query: str, limit: int = 10, verbose: bool = False) -
     全部超時 / 失敗才回 error。
     """
     sources = [
+        ("jina",         search_jina_async),
         ("google_news",  search_google_news_async),
-        ("bing_news",     search_bing_news_async),
-        ("duckduckgo",    search_duckduckgo_async),
-        ("wikipedia",     search_wikipedia_async),
+        ("bing_news",    search_bing_news_async),
+        ("duckduckgo",   search_duckduckgo_async),
+        ("wikipedia",    search_wikipedia_async),
     ]
 
     # 同時發起所有搜尋任務
@@ -390,7 +472,7 @@ async def web_search_async(query: str, limit: int = 10, verbose: bool = False) -
     return {
         "source": "none",
         "results": [],
-        "error": "所有來源（Google News、Bing News、DuckDuckGo、Wikipedia）都失敗",
+        "error": "所有來源（Jina、Google News、Bing News、DuckDuckGo、Wikipedia）都失敗",
     }
 
 
@@ -409,10 +491,11 @@ def web_search_to_string(query: str, limit: int = 10, verbose: bool = False) -> 
         return f"[網路搜尋失敗：{data['error']}]"
 
     source_labels = {
+        "jina":        "Jina",
         "google_news": "Google News",
-        "bing_news": "Bing News",
-        "duckduckgo": "DuckDuckGo",
-        "wikipedia": "Wikipedia",
+        "bing_news":   "Bing News",
+        "duckduckgo":  "DuckDuckGo",
+        "wikipedia":   "Wikipedia",
     }
     source_label = source_labels.get(data["source"], data["source"])
     now_str = datetime.now().strftime("%Y年%m月%d日 %H:%M")

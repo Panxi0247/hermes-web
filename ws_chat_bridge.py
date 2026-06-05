@@ -15,9 +15,11 @@ import websockets
 import httpx
 from datetime import datetime
 from urllib.parse import quote
+from playwright.sync_api import sync_playwright
 
 # 多來源網路搜尋（Google News → Bing News → DuckDuckGo，自動降級）
 from fallback_web_search import web_search_to_string as fallback_search_to_string
+from fallback_web_search import web_search_async
 from fallback_web_search import SearchResult
 
 HERMES_HOST = os.getenv("HERMES_HOST", "127.0.0.1")
@@ -25,75 +27,493 @@ HERMES_PORT = int(os.getenv("HERMES_PORT", "8642"))
 WS_PORT = int(os.getenv("WS_PORT", "8767"))
 
 
-# ─── 通用意圖偵測：是否為推薦資訊類查詢 ───
+# ─── 擴充版資訊意圖偵測（行程助理核心）─────────────────────────────
 
 RECOMMEND_PATTERNS = [
-    # 中文
+    # ── 明確推薦意圖（原有）─────────────────
     r"有.*推薦", r"推薦.*", r"值得.*看", r"有.*值得",
     r"最近.*怎麼", r"最近.*發展", r"最近.*進展", r"最近.*動態",
     r"有.*新聞", r"有.*報導", r"有.*文章", r"想了解", r"想知",
     r"想看.*關於", r"給我.*關於", r"幫我找.*", r"有什麼.*推薦",
     r"有什麼新鮮事", r"最近有什麼",
-    # 英文
-    r"recommend", r"suggest", r"worth reading", r"worth watching",
-    r"what's happening", r"what happened", r"latest on",
-    r"can you tell me about", r"i'm interested in",
+    # ── 行程助理常見問法（大幅擴充）────────
+    r"告訴我.*", r"介紹.*", r"請問", r"我想知道",
+    r"什麼是", r"是什麼", r"怎麼樣", r"怎樣",
+    r"何時", r"幾時", r"幾點", r"哪裡", r"在哪", r"地在哪",
+    r"誰.*是", r"誰.*在", r"什麼.*時候", r"為什麼",
+    r"有什麼.*活動", r"有.*比賽", r"有.*賽事",
+    r"賽程", r"賽果", r"戰況", r"戰績",
+    r"門票", r"票價", r"地點", r"位置",
+    r"最新.*", r"最近.*活動", r"即時.*",
+    r"天氣", r"氣溫", r"下雨", r"晴天",
+    r"路況", r"交通", r"航班", r"火車",
+    # ── 主題領域關鍵字（自動觸發搜尋）──────
+    r"FIFA", r"世界盃", r"奧運", r"亞奧運", r"NBA", r"MLB", r"世界杯",
+    r"演唱會", r"音樂節", r"展覽", r"活動", r"節日",
+    r"春節", r"端午", r"中秋", r"跨年", r"新年",
+    # ── 英文常見問法 ───────────────────────
+    r"what is", r"what's", r"who is", r"who's", r"when is", r"where is",
+    r"tell me about", r"what happened", r"what's happening",
+    r"latest", r"schedule", r"results", r"score",
+    r"can you tell me", r"i want to know", r"looking for",
 ]
 
-STOPWORDS = {
-    # 中文通用詞
-    "的", "是", "在", "有", "和", "與", "了", "嗎", "呢", "吧", "啊",
-    "我", "你", "他", "她", "它", "我們", "你們", "他們", "大家",
-    "這", "那", "什麼", "怎麼", "為什麼", "如何", "哪", "哪些",
-    "一下", "些", "一點", "個", "別人",
-    "可以", "能", "會", "要", "想", "覺得",
-    "最近", "現在", "目前", "今天", "明天", "昨天",
-    "情況", "消息", "進展", "最新",
-    "推薦", "值得", "幫我", "給我", "想了解", "想知道",
-    "請問", "有什麼", "沒", "沒什麼",
-    # 英文通用詞
-    "please", "can", "could", "would", "i", "me", "my", "you", "your",
-    "a", "an", "the", "is", "are", "was", "were", "to", "of", "in",
-    "for", "on", "with", "at", "by", "from", "what", "when", "where",
-    "how", "who", "which", "that", "this", "these", "those",
-}
+# 需要主動搜尋的主題領域（，出現任一詞就觸發）
+LIVE_INFO_TOPICS = [
+    # 運動賽事
+    "世界盃", "FIFA", "足球", "籃球", "NBA", "棒球", "MLB", "網球",
+    "奧運", "亞運", "世界杯", "大賽", "賽事", "比賽", "季後賽", "總決賽",
+    # 娛樂活動
+    "演唱會", "音樂節", "展覽", "影展", "電影", "新片", "上映",
+    "演唱", "歌手", "明星", "偶像",
+    # 時事新聞
+    "新聞", "時事", "最新", "頭條", "熱門",
+    # 行程相關
+    "行程", "活動", "會議", "約", "時間", "日程", "表訂",
+    # 氣象交通
+    "天氣", "氣象", "雨", "風", "溫度", "交通", "路況", "航班", "高鐵",
+    # 英文關鍵字
+    "news", "event", "match", "game", "concert", "festival", "schedule",
+    "ticket", "weather", "result", "score", "live",
+]
+
+# 問句模式（問什麼/何時/哪裡/誰/為什麼 + 有意義主題詞）
+QUESTION_PATTERNS = [
+    r"告訴我.*[^\s]", r"請問.*[^\s]", r"我想知道.*[^\s]",
+    r"什麼是.*[^\s]", r"什麼.*時候", r"什麼.*地點", r"什麼.*原因",
+    r"何時.*[^\s]", r"幾時.*[^\s]", r"幾點.*[^\s]",
+    r"在哪.*[^\s]", r"哪裡.*[^\s]", r"地在哪",
+    r"誰.*[^\s]", r"為什麼.*[^\s]", r"怎麼.*[^\s]", r"怎樣.*[^\s]",
+    # 英文問句
+    r"what (is|are|was|were| happened| going)", r"when (is|are|was|does|did)",
+    r"where (is|are|was|does)", r"who (is|are|was|does)",
+    r"why (is|are|was|does|did)", r"how (do|does|did|to)",
+]
+
+# 應排除的單純對話（不該觸發搜尋）
+CONVERSATION_PATTERNS = [
+    r"^[\s]*你好", r"^[\s]*您好", r"^[\s]*早安", r"^[\s]*午安", r"^[\s]*晚安",
+    r"^[\s]*hi[\s]*$", r"^[\s]*hey[\s]*$", r"^[\s]*hello[\s]*$",
+    r"^[\s]*謝謝", r"^[\s]*感謝", r"^[\s]*再見", r"^[\s]*掰掰",
+    r"^[\s]*沒錯", r"^[\s]*對", r"^[\s]*好的", r"^[\s]*好",
+    r"^[\s]*可以", r"^[\s]*好啊",
+]
+
+
+def _has_live_topic(text: str) -> bool:
+    """檢查是否提及需要即時資訊的主題"""
+    t = text.lower()
+    return any(kw.lower() in t for kw in LIVE_INFO_TOPICS)
+
+
+def _is_question(text: str) -> bool:
+    """檢查是否為問句"""
+    for p in QUESTION_PATTERNS:
+        if re.search(p, text, re.IGNORECASE):
+            return True
+    # 中文問句：結尾有問號
+    if "？" in text or "?" in text:
+        return True
+    return False
+
+
+def _is_simple_conversation(text: str) -> bool:
+    """檢查是否為單純寒喧（不該浪費搜尋配額）"""
+    stripped = text.strip()
+    for p in CONVERSATION_PATTERNS:
+        if re.search(p, stripped, re.IGNORECASE):
+            return True
+    # 真的太短（<4字）且無明確主題
+    if len(stripped) < 4 and not _has_live_topic(stripped):
+        return True
+    return False
 
 
 def detect_recommendation_intent(user_message: str) -> bool:
-    """偵測是否為推薦/資訊查詢意圖"""
+    """
+    擴充版偵測：幾乎任何需要參考資料的問答都出發搜尋。
+    觸發條件（符合任一）：
+      1. 匹配 RECOMMEND_PATTERNS（明確推薦意圖）
+      2. 包含 LIVE_INFO_TOPICS 關鍵字（行程助理核心場景）
+      3. 同時滿足：問句 + 非純寒喧（動態資訊需求）
+    排除：純寒喧、太短無意義句
+    """
+    text = user_message.strip()
+    if not text:
+        return False
+
+    # 排除：純寒喧 / 問候 / 太短
+    if _is_simple_conversation(text):
+        return False
+
+    # 條件1：匹配任一推薦/資訊 pattern
     for pattern in RECOMMEND_PATTERNS:
+        if re.search(pattern, text, re.IGNORECASE):
+            return True
+
+    # 條件2：提到需要即時資訊的主題
+    if _has_live_topic(text):
+        return True
+
+    # 條件3：問句 + 有實質內容（非純問候）
+    if _is_question(text) and len(text) >= 6:
+        return True
+
+    return False
+
+
+def extract_topic_keywords(user_message: str) -> str:
+    """從使用者訊息中抽取感興趣的主題關鍵字（支援中英文混合）
+
+    擴充版：同時參考 RECOMMEND_PATTERNS、LIVE_INFO_TOPICS、QUESTION_PATTERNS
+    的關鍵字，優先取完整詞組而非單字。
+    """
+    text = user_message.strip()
+    if not text:
+        return ""
+
+    keywords: list[str] = []
+
+    # ── Step 1: 把所有 pattern 詞集合在一起，完整匹配 ──
+    all_pattern_keywords: list[str] = [
+        # 領域關鍵字 → 直接納入（取完整匹配）
+        "世界盃", "世界杯", "FIFA", "奧運", "亞運", "NBA", "MLB",
+        "演唱會", "音樂節", "展覽", "影展", "演唱", "偶像",
+        "春節", "端午", "中秋", "跨年", "新年",
+        "天氣", "氣象", "交通", "路況", "航班", "高鐵",
+        # 賽事相關
+        "賽程", "賽果", "戰況", "戰績", "門票", "票價",
+        # 新聞/時事
+        "頭條", "熱門",
+    ]
+    for kw in all_pattern_keywords:
+        # 不分大小寫完整匹配
+        if re.search(re.escape(kw), text, re.IGNORECASE):
+            keywords.append(kw)
+
+    # ── Step 2: 中文長詞 n-gram 提取（2-4 字）─────────────
+    chinese_seqs = re.findall(r'[\u4e00-\u9fff]+', text)
+    stopword_chars = set(
+        "的是在有和與了嗎呢吧啊我你他她它我們你們大家"
+        "這那什麼怎麼為什麼如何哪哪些一下些一點個別人"
+        "可以能會要我想覺得最近現在目前今天明天昨天情況"
+        "消息進展最新推薦值得幫我給我想了解想知道請問有什麼沒"
+    )
+    for seq in chinese_seqs:
+        if len(seq) > 3:
+            ngrams = set()
+            for n in range(2, 5):
+                for i in range(len(seq) - n + 1):
+                    ngrams.add(seq[i:i+n])
+            for ng in sorted(ngrams, key=len, reverse=True):
+                if len(ng) >= 2 and all(c not in stopword_chars for c in ng):
+                    if ng not in keywords:
+                        keywords.append(ng)
+                    break
+        elif len(seq) >= 2 and seq not in stopword_chars:
+            if seq not in keywords:
+                keywords.append(seq)
+
+    # ── Step 3: 英文單字 ──────────────────────────────────
+    english_words = re.findall(r'[a-zA-Z0-9]{2,}', text)
+    en_stop = {"please", "can", "could", "would", "about", "what", "when",
+               "where", "who", "why", "how", "this", "that", "these", "those",
+               "tell", "want", "know", "looking", "find", "need", "latest",
+               "search", "from", "have", "with", "for", "the", "and", "but"}
+    for w in english_words:
+        if w.lower() not in en_stop and w not in keywords:
+            keywords.append(w)
+
+    return " ".join(keywords[:6])
+    """從使用者訊息中抽取感興趣的主題關鍵字（支援中英文混合）
+
+    擴充版：同時參考 RECOMMEND_PATTERNS、LIVE_INFO_TOPICS、QUESTION_PATTERNS
+    的關鍵字，優先取完整詞組而非單字。
+    """
+    text = user_message.strip()
+    if not text:
+        return ""
+
+    keywords: list[str] = []
+
+    # ── Step 1: 把所有 pattern 詞集合在一起，完整匹配 ──
+    all_pattern_keywords: list[str] = [
+        # 領域關鍵字 → 直接納入（取完整匹配）
+        "世界盃", "世界杯", "FIFA", "奧運", "亞運", "NBA", "MLB",
+        "演唱會", "音樂節", "展覽", "影展", "演唱", "偶像",
+        "春節", "端午", "中秋", "跨年", "新年",
+        "天氣", "氣象", "交通", "路況", "航班", "高鐵",
+        # 賽事相關
+        "賽程", "賽果", "戰況", "戰績", "門票", "票價",
+        # 新聞/時事
+        "頭條", "熱門",
+    ]
+    for kw in all_pattern_keywords:
+        # 不分大小寫完整匹配
+        if re.search(re.escape(kw), text, re.IGNORECASE):
+            keywords.append(kw)
+
+    # ── Step 2: 中文長詞 n-gram 提取（2-4 字）─────────────
+    chinese_seqs = re.findall(r'[\u4e00-\u9fff]+', text)
+    stopword_chars = set(
+        "的是在有和與了嗎呢吧啊我你他她它我們你們大家"
+        "這那什麼怎麼為什麼如何哪哪些一下些一點個別人"
+        "可以能會要我想覺得最近現在目前今天明天昨天情況"
+        "消息進展最新推薦值得幫我給我想了解想知道請問有什麼沒"
+    )
+    for seq in chinese_seqs:
+        if len(seq) > 3:
+            ngrams = set()
+            for n in range(2, 5):
+                for i in range(len(seq) - n + 1):
+                    ngrams.add(seq[i:i+n])
+            for ng in sorted(ngrams, key=len, reverse=True):
+                if len(ng) >= 2 and all(c not in stopword_chars for c in ng):
+                    if ng not in keywords:
+                        keywords.append(ng)
+                    break
+        elif len(seq) >= 2 and seq not in stopword_chars:
+            if seq not in keywords:
+                keywords.append(seq)
+
+    # ── Step 3: 英文單字 ──────────────────────────────────
+    english_words = re.findall(r'[a-zA-Z0-9]{2,}', text)
+    en_stop = {"please", "can", "could", "would", "about", "what", "when",
+               "where", "who", "why", "how", "this", "that", "these", "those",
+               "tell", "want", "know", "looking", "find", "need", "latest",
+               "search", "from", "have", "with", "for", "the", "and", "but"}
+    for w in english_words:
+        if w.lower() not in en_stop and w not in keywords:
+            keywords.append(w)
+
+    return " ".join(keywords[:6])
+
+
+# ─── 通用爬網頁意圖偵測 ───
+
+CRAWL_PATTERNS = [
+    # 中文：問網頁內容、最近更新、特定網站
+    r"幫我查.*網站", r"幫我看看.*網站", r"這個.*網站", r"那個.*網站",
+    r"最近.*更新", r"最新.*動態", r"這個.*怎麼樣", r"那個.*怎麼樣",
+    r"幫我上網查", r"幫我搜尋.*網頁", r"查一下.*", r"查看.*",
+    r"請幫我查.*", r"幫我找.*資料", r"上網查.*",
+    # 英文
+    r"look up", r"check.*website", r"browse", r"crawl", r"fetch.*page",
+    r"what's on.*site", r"get.*content",
+]
+
+CRAWL_STOPWORDS = {
+    "的", "是", "在", "有", "和", "與", "了", "嗎", "呢", "吧", "啊",
+    "我", "你", "他", "她", "它", "我們", "你們", "大家",
+    "這", "那", "什麼", "怎麼", "為什麼", "如何", "哪", "哪些",
+    "一下", "些", "一點", "個", "請問", "能", "會", "要", "可以",
+    "最近", "現在", "目前", "今天", "明天", "昨天",
+}
+
+
+def detect_crawl_intent(user_message: str) -> bool:
+    """偵測是否需要爬網頁（給定 URL 或可抽取關鍵字）"""
+    for pattern in CRAWL_PATTERNS:
         if re.search(pattern, user_message, re.IGNORECASE):
             return True
     return False
 
 
-def extract_topic_keywords(user_message: str) -> str:
-    """從使用者訊息中抽取感興趣的主題關鍵字（支援中英文混合）"""
+def extract_crawl_keywords(user_message: str) -> str:
+    """從訊息中抽取可當作搜尋關鍵字的詞"""
     text = re.sub(r'[^\w\s]', ' ', user_message)
-
-    # 取出中文序列（整段）、英文單字
     chinese_seqs = re.findall(r'[\u4e00-\u9fff]+', text)
     english_words = re.findall(r'[a-zA-Z0-9]+', text)
 
-    all_keywords = []
+    keywords = []
     for seq in chinese_seqs:
-        if seq not in STOPWORDS:
-            all_keywords.append(seq)
-
+        if seq not in CRAWL_STOPWORDS:
+            keywords.append(seq)
     for w in english_words:
-        if w.lower() not in STOPWORDS and len(w) > 1:
-            all_keywords.append(w)
+        if w.lower() not in CRAWL_STOPWORDS and len(w) > 1:
+            keywords.append(w)
 
-    return " ".join(all_keywords[:5])
+    return " ".join(keywords[:5])
+
+
+# ─── 爬蟲（透過 FastAPI 後端）───
+
+def crawl_via_api(keywords: str) -> str:
+    """呼叫 FastAPI /api/crawl 拿網頁內容（嘗試 DuckDuckGo API → 維基百科 API）"""
+    if not keywords.strip():
+        return ""
+
+    import requests as req
+    target_url = None
+
+    # ── 嘗試 1: DuckDuckGo JSON API ──
+    try:
+        api_url = f"https://api.duckduckgo.com/?q={quote(keywords)}&format=json&no_redirect=1&t=hermes"
+        headers = {"User-Agent": "HermesBot/1.0"}
+        resp = req.get(api_url, headers=headers, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            # 從 RelatedTopics 找第一個外部 URL
+            for topic in data.get("RelatedTopics", []):
+                url = topic.get("FirstURL", "")
+                if url and url.startswith("http"):
+                    target_url = url
+                    break
+            # 備用：AbstractText/AbstractURL（維基百科之類的摘要）
+            if not target_url:
+                abstract_url = data.get("AbstractURL", "")
+                if abstract_url:
+                    target_url = abstract_url
+    except Exception:
+        pass
+
+    # ── 嘗試 2: Bing News RSS ──
+    if not target_url:
+        try:
+            import re as re2
+            rss_url = f"https://www.bing.com/news/search?q={quote(keywords)}&format=rss"
+            headers2 = {"User-Agent": "Mozilla/5.0 (compatible; HermesBot/1.0)"}
+            resp2 = req.get(rss_url, headers=headers2, timeout=10)
+            if resp2.status_code == 200:
+                items = re2.findall(r'<url>(https?://[^<]+)</url>', resp2.text)
+                for item_url in items[:5]:
+                    if item_url and not any(x in item_url for x in ["bing.com", "microsoft.com"]):
+                        target_url = item_url[:500]
+                        break
+        except Exception:
+            pass
+
+    # ── 嘗試 3: Wikipedia API ──
+    if not target_url:
+        try:
+            # 先嘗試英文維基
+            wiki_api = f"https://en.wikipedia.org/api/rest_v1/page/summary/{quote(keywords.split()[0])}"
+            headers3 = {"User-Agent": "HermesBot/1.0 (contact: hermes@example.com)"}
+            resp3 = req.get(wiki_api, headers=headers3, timeout=8)
+            if resp3.status_code == 200:
+                data3 = resp3.json()
+                if data3.get("content_urls", {}).get("desktop", {}).get("page"):
+                    target_url = data3["content_urls"]["desktop"]["page"]
+        except Exception:
+            pass
+
+    if not target_url:
+        return ""
+
+    # ── 用 FastAPI /api/crawl 爬取目標頁面 ──
+    try:
+        crawl_resp = req.post(
+            "http://localhost:8000/api/crawl",
+            json={"url": target_url, "max_links": 5},
+            timeout=20
+        )
+        if crawl_resp.status_code == 200:
+            data = crawl_resp.json()
+            if data.get("error"):
+                return ""
+            if data.get("content") and data.get("title"):
+                title = data["title"]
+                content = data["content"][:800]
+                return f"📄 爬取結果（「{title}」）\n\n{content}\n\n來源：{target_url}"
+    except Exception:
+        pass
+    return ""
+
+
+# ─── Playwright 通用爬蟲 ─────────────────────────────────────────────
+
+BROWSER_PATH = "/snap/chromium/3459/usr/lib/chromium-browser/chrome"
+
+def crawl_with_playwright(url: str, timeout: int = 15000) -> str:
+    """用系統 chromium 無頭模式爬取任意 URL，回傳純文字"""
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                executable_path=BROWSER_PATH,
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+            )
+            page = browser.new_page()
+            page.goto(url, timeout=timeout)
+            # 等 JS 渲染完成
+            page.wait_for_load_state("networkidle", timeout=timeout)
+            text = page.inner_text("body")
+            browser.close()
+            return text.strip()[:3000] if text else ""
+    except Exception:
+        return ""
 
 
 # ─── 新聞推薦：多來源降級搜尋 ───────────────────────────────────
 
-def fetch_news_for_topic(keywords: str) -> str:
-    """用 fallback_web_search 多來源降級拿新聞（Google → Bing → DuckDuckGo）"""
+async def fetch_news_for_topic(keywords: str) -> str:
+    """用 fallback_web_search 多來源降級拿新聞（Google → Bing → DuckDuckGo）
+       全部失敗時則嘗試直接 crawl python.org 下載頁面"""
     if not keywords.strip():
         return ""
-    return fallback_search_to_string(keywords, limit=12, verbose=False)
+
+    print(f"[fetch_news_for_topic] 開始搜尋，關鍵字={keywords}", flush=True)
+    data = await web_search_async(keywords, limit=12, verbose=False)
+    print(f"[fetch_news_for_topic] web_search_async 完成，source={data.get('source')}, results={len(data.get('results',[]))}, error={data.get('error')}", flush=True)
+
+    # 新聞 API 成功
+    if not data.get("error") and data.get("results"):
+        source_labels = {
+            "jina":        "Jina",
+            "google_news": "Google News",
+            "bing_news":   "Bing News",
+            "duckduckgo":  "DuckDuckGo",
+            "wikipedia":   "Wikipedia",
+        }
+        source_label = source_labels.get(data["source"], data["source"])
+        now_str = datetime.now().strftime("%Y年%m月%d日 %H:%M")
+
+        lines = [f"🔍 「{keywords}」搜尋結果（{source_label}，{now_str}）\n"]
+        for r in data.get("results", []):
+            line = r.to_str()
+            if r.snippet:
+                line += f"\n   └─ {r.snippet[:120]}"
+            lines.append(line)
+        return "\n".join(lines)
+
+    # 新聞來源全部失敗 → fallback：先用 Playwright 爬 news.google.com
+    try:
+        news_url = f"https://news.google.com/search?q={quote(keywords)}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
+        content = crawl_with_playwright(news_url, timeout=15000)
+        if content and len(content) > 100:
+            lines = content.split("\n")
+            meaningful = [l.strip() for l in lines if len(l.strip()) > 15][:25]
+            if meaningful:
+                return (
+                    f"🔍 「{keywords}」（News 爬蟲，{datetime.now().strftime('%Y年%m月%d日 %H:%M')}）\n\n"
+                    + "\n".join(f"• {l}" for l in meaningful)
+                    + f"\n\n來源：{news_url}"
+                )
+    except Exception:
+        pass
+
+    # 最後 fallback：python.org 下載頁面
+    topic_lower = keywords.lower()
+    if "python" in topic_lower or "py" in topic_lower:
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(
+                    "http://127.0.0.1:8000/api/crawl",
+                    json={"url": "https://www.python.org/downloads/", "max_links": 3}
+                )
+                if resp.status_code == 200:
+                    result = resp.json()
+                    content = result.get("content", "")
+                    if content and len(content) > 50:
+                        return (
+                            f"📦 Python 官網下載頁面（直接抓取）\n\n"
+                            f"{content[:600]}\n\n"
+                            f"來源：https://www.python.org/downloads/"
+                        )
+        except Exception:
+            pass
+
+    return f"[網路搜尋失敗：所有來源（Google News、Bing News、DuckDuckGo、Wikipedia、Playwright）都失敗]"
 
 
 # ─── 維基百科條目 ───
@@ -134,11 +554,11 @@ def fetch_wikipedia_summary(keywords: str) -> str:
 # ─── 主 Bridge 邏輯 ───
 
 async def bridge_to_hermes(messages: list, model: str) -> str:
-    """呼叫 Hermes REST streaming，回傳完整回應"""
+    """呼叫 Hermes REST non-streaming，回傳完整回應"""
     hermes_payload = {
         "model": model,
         "messages": messages,
-        "stream": True,
+        "stream": False,
     }
     headers = {
         "Content-Type": "application/json",
@@ -146,30 +566,17 @@ async def bridge_to_hermes(messages: list, model: str) -> str:
 
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
-            async with client.stream(
-                "POST",
+            resp = await client.post(
                 f"http://{HERMES_HOST}:{HERMES_PORT}/v1/chat/completions",
                 json=hermes_payload,
                 headers=headers,
-            ) as resp:
-                if resp.status_code != 200:
-                    text = await resp.aread()
-                    return json.dumps({"error": f"HTTP {resp.status_code}: {text.decode()}"})
+            )
+            if resp.status_code != 200:
+                return json.dumps({"error": f"HTTP {resp.status_code}: {resp.text}"})
 
-                full_content = ""
-                async for line in resp.aiter_lines():
-                    if line.startswith("data: "):
-                        data = line[6:]
-                        if data == "[DONE]":
-                            continue
-                        try:
-                            json_data = json.loads(data)
-                            content = json_data.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                            if content:
-                                full_content += content
-                        except json.JSONDecodeError:
-                            pass
-                return json.dumps({"content": full_content})
+            data = resp.json()
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            return json.dumps({"content": content})
     except Exception as e:
         return json.dumps({"error": str(e)})
 
@@ -204,32 +611,44 @@ async def chat_handler(websocket):
 
                 if keywords:
                     # 先拿新聞
-                    news_data = fetch_news_for_topic(keywords)
+                    news_data = await fetch_news_for_topic(keywords)
                     if news_data and len(news_data) > 50:
-                        print(f"[Info Fallback] 拿到新聞，長度: {len(news_data)} 字")
-                        context_msg = {
-                            "role": "system",
-                            "content": (
-                                f"【以下是你可以使用的參考資料，不需要再呼叫搜尋工具】\n\n"
-                                f"{news_data}\n\n"
-                                f"請根據以上資料，主動推薦用戶值得關注的內容，並簡要說明為什麼值得看。"
-                            )
-                        }
-                        messages = [context_msg] + messages
+                        print(f"[Info Fallback] 拿到新聞，長度: {len(news_data)} 字，直接回傳前端")
+                        await websocket.send(json.dumps({
+                            "type": "search_result",
+                            "content": news_data,
+                            "done": True,
+                        }))
+                        continue  # 結束這輪，不送 LLM
                     else:
                         # 新聞太少，試維基
                         wiki_data = fetch_wikipedia_summary(keywords)
                         if wiki_data:
-                            print(f"[Info Fallback] 拿到維基摘要，長度: {len(wiki_data)} 字")
-                            context_msg = {
-                                "role": "system",
-                                "content": (
-                                    f"【以下是你可以使用的參考資料，不需要再呼叫搜尋工具】\n\n"
-                                    f"{wiki_data}\n\n"
-                                    f"請根據以上資料，主動推薦用戶值得關注的內容，並簡要說明為什麼值得了解。"
-                                )
-                            }
-                            messages = [context_msg] + messages
+                            print(f"[Info Fallback] 拿到維基摘要，長度: {len(wiki_data)} 字，直接回傳前端")
+                            await websocket.send(json.dumps({
+                                "type": "search_result",
+                                "content": wiki_data,
+                                "done": True,
+                            }))
+                            continue  # 結束這輪，不送 LLM
+
+            # ── 爬蟲意圖偵測 ──
+            if detect_crawl_intent(user_text):
+                crawl_kw = extract_crawl_keywords(user_text)
+                if crawl_kw:
+                    print(f"[Crawl] 偵測到爬蟲意圖，關鍵字:「{crawl_kw}」")
+                    crawl_data = crawl_via_api(crawl_kw)
+                    if crawl_data:
+                        print(f"[Crawl] 拿到內容，長度: {len(crawl_data)} 字")
+                        context_msg = {
+                            "role": "system",
+                            "content": (
+                                f"【以下是你可以使用的參考資料，不需要再呼叫搜尋工具】\n\n"
+                                f"{crawl_data}\n\n"
+                                f"請根據以上資料回答用戶問題。如果資料不足或無法回答，請說明並建議用戶提供更多細節。"
+                            )
+                        }
+                        messages = [context_msg] + messages
 
             result = await bridge_to_hermes(messages, model)
 

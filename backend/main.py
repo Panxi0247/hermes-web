@@ -2,6 +2,7 @@
 Hermes Web Backend - FastAPI server
 Provides OpenAI-compatible API + WebSocket terminal
 """
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -10,6 +11,9 @@ from typing import List, Optional, Literal
 import datetime
 import httpx
 import os
+import requests
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin
 
 # Config
 HERMES_HOST = os.getenv("HERMES_HOST", "127.0.0.1")
@@ -26,8 +30,19 @@ ALLOWED_COMMANDS = {
     "whoami": {"args": 0, "description": "Current user"},
 }
 
+# --- Lifespan ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    print(f"Hermes Web Backend starting on port {PORT}")
+    print(f"Proxying to Hermes at {HERMES_HOST}:{HERMES_PORT}")
+    yield
+    # Shutdown
+    await http_client.aclose()
+
+
 # FastAPI app
-app = FastAPI(title="Hermes Web Backend", version="1.0.0")
+app = FastAPI(title="Hermes Web Backend", version="1.0.0", lifespan=lifespan)
 
 # CORS - 允許前端跨域請求，來源由環境變數控制
 # FRONTEND_ORIGIN 格式如：http://192.168.1.100:5173
@@ -247,6 +262,82 @@ async def run_cli(req: CliRequest):
         return CliResponse(output="", error=str(e))
 
 
+# --- Crawl Endpoint ---
+class CrawlRequest(BaseModel):
+    url: str
+    max_links: int = 10  # 回傳的連結數量上限
+
+
+class CrawlResponse(BaseModel):
+    url: str
+    title: Optional[str] = None
+    content: Optional[str] = None  # 去除 HTML 標籤的文字內容
+    links: List[str] = []
+    status_code: Optional[int] = None
+    error: Optional[str] = None
+
+
+@app.post("/api/crawl", response_model=CrawlResponse)
+async def crawl_page(req: CrawlRequest):
+    """
+    使用 requests + BeautifulSoup 爬取網頁。
+    適合純 HTML 靜態頁面，無法處理 JavaScript 動態內容。
+    """
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (compatible; HermesBot/1.0; +http://hermes.local)"
+        }
+        resp = requests.get(req.url, headers=headers, timeout=15)
+        resp.raise_for_status()
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        # 取得標題
+        title = None
+        if soup.title:
+            title = soup.title.string
+        elif soup.find("h1"):
+            title = soup.find("h1").get_text(strip=True)
+
+        # 去除 script/style/nav/footer 等無用標籤
+        for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
+            tag.decompose()
+
+        # 取得純文字內容（保留段落）
+        content_parts = []
+        for p in soup.find_all(["p", "h1", "h2", "h3", "h4", "li"]):
+            text = p.get_text(strip=True)
+            if text:
+                content_parts.append(text)
+        content = "\n\n".join(content_parts)
+
+        # 取得連結（絕對 URL，限 max_links 個）
+        links = []
+        base = resp.url
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if href.startswith("http"):
+                links.append(href)
+            elif href.startswith("/"):
+                links.append(urljoin(base, href))
+            if len(links) >= req.max_links:
+                break
+
+        return CrawlResponse(
+            url=resp.url,
+            title=title,
+            content=content,
+            links=links,
+            status_code=resp.status_code,
+        )
+    except requests.exceptions.Timeout:
+        return CrawlResponse(url=req.url, error="請求逾時（15秒）")
+    except requests.exceptions.HTTPError as e:
+        return CrawlResponse(url=req.url, error=f"HTTP 錯誤: {e.response.status_code}")
+    except requests.exceptions.RequestException as e:
+        return CrawlResponse(url=req.url, error=f"請求失敗: {str(e)}")
+
+
 # --- Health ---
 @app.get("/health")
 async def health():
@@ -262,20 +353,10 @@ async def root():
             "chat": "POST /v1/chat/completions",
             "terminal": "WS /ws/terminal",
             "cli": "POST /api/cli",
+            "crawl": "POST /api/crawl",
             "health": "GET /health",
         }
     }
-
-
-# --- Startup ---
-@app.on_event("startup")
-async def startup():
-    print(f"Hermes Web Backend starting on port {PORT}")
-    print(f"Proxying to Hermes at {HERMES_HOST}:{HERMES_PORT}")
-
-@app.on_event("shutdown")
-async def shutdown():
-    await http_client.aclose()
 
 
 if __name__ == "__main__":

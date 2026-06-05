@@ -238,6 +238,15 @@
   overflow: auto;
 }
 
+.calendar-grid.week-grid {
+  display: grid;
+  grid-template-rows: 1fr;
+}
+
+.calendar-grid.week-grid .calendar-cell {
+  min-height: 320px;
+}
+
 .calendar-cell {
   min-height: 112px;
   padding: 9px;

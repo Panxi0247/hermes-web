@@ -1,10 +1,10 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useRef } from "react";
 import type { SetStateAction } from "react";
 import "./App.css";
 import Chat from "./components/Chat";
 import ChatHistory from "./components/ChatHistory";
 import Schedule from "./components/Schedule";
-import { healthCheck } from "./api/chat";
+import Settings from "./components/Settings";
 import type { Conversation, Message } from "./types";
 import {
   getWelcomeMessages,
@@ -18,22 +18,12 @@ type Page = "schedule" | "chat" | "settings" | "history";
 
 export default function App() {
   const [page, setPage] = useState<Page>("schedule");
-  const [connected, setConnected] = useState(false);
+  const [wsConnected, setWsConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [chatMessages, setChatMessages] = useState<Message[]>(getWelcomeMessages);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>(loadConversations);
   const conversationIdRef = useRef<string | null>(null);
-
-  useEffect(() => {
-    const check = async () => {
-      const ok = await healthCheck();
-      setConnected(ok);
-    };
-    check();
-    const interval = setInterval(check, 30000);
-    return () => clearInterval(interval);
-  }, []);
 
   const persistMessages = (messages: Message[]) => {
     if (messages.length <= 1) return;
@@ -60,7 +50,7 @@ export default function App() {
     });
   };
 
-  const showError = (msg: string) => {
+  const handleShowError = (msg: string) => {
     setError(msg);
     setTimeout(() => setError(null), 5000);
   };
@@ -136,12 +126,12 @@ export default function App() {
           </nav>
         </div>
 
-        {/* 連線狀態 */}
+        {/* 連線狀態 — 統一看 WebSocket 連線 */}
         <div className="sidebar-footer">
           <div className="sidebar-status">
-            <span className={`status-dot ${connected ? "ok" : "error"}`} />
+            <span className={`status-dot ${wsConnected ? "ok" : "error"}`} />
             <span className="status-text">
-              {connected ? "已連接" : "未連接"}
+              {wsConnected ? "已連接" : "未連接"}
             </span>
           </div>
         </div>
@@ -155,14 +145,13 @@ export default function App() {
         {page === "schedule" && <Schedule />}
         {page === "chat" && (
           <Chat
-            onError={showError}
+            onError={handleShowError}
             messages={chatMessages}
             onMessagesChange={handleMessagesChange}
+            onWsConnectedChange={setWsConnected}
           />
         )}
-        {page === "settings" && (
-          <div className="settings-placeholder">Settings — coming soon</div>
-        )}
+        {page === "settings" && <Settings />}
         {page === "history" && (
           <ChatHistory
             conversations={conversations}
