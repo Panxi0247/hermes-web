@@ -2,11 +2,18 @@ import type { EventPriority, EventTone } from "./types";
 
 export const weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
+export const TONE_LABELS: Record<EventTone, string> = {
+  IP4: "緊急",
+  IP3: "重要",
+  IP2: "一般",
+  IP1: "輕緩",
+};
+
 export const TONE_COLORS: Record<EventTone, string> = {
-  IP4: "var(--IP4, #fce24e)",
-  IP3: "var(--IP3, #2dcc17)",
-  IP2: "var(--IP2, #20f0e5)",
-  IP1: "var(--IP1, #3b74ca)",
+  IP4: "var(--IP4, #ee7f95)",
+  IP3: "var(--IP3, #f4c86a)",
+  IP2: "var(--IP2, #64d2a4)",
+  IP1: "var(--IP1, #80b7ff)",
 };
 
 export const generateId = () => Math.random().toString(36).slice(2, 10);
