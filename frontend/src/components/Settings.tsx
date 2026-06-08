@@ -1,5 +1,7 @@
 import "./Settings.css";
 
+// TODO: 期末階段擴充 - 引入 Hermes 使用者身份與 Personal Memory 設定
+//  current: 所有點擊均為 static placeholder，未對接後端
 export default function Settings() {
   return (
     <div className="settings">
