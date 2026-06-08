@@ -225,68 +225,6 @@ def extract_topic_keywords(user_message: str) -> str:
             keywords.append(w)
 
     return " ".join(keywords[:6])
-    """從使用者訊息中抽取感興趣的主題關鍵字（支援中英文混合）
-
-    擴充版：同時參考 RECOMMEND_PATTERNS、LIVE_INFO_TOPICS、QUESTION_PATTERNS
-    的關鍵字，優先取完整詞組而非單字。
-    """
-    text = user_message.strip()
-    if not text:
-        return ""
-
-    keywords: list[str] = []
-
-    # ── Step 1: 把所有 pattern 詞集合在一起，完整匹配 ──
-    all_pattern_keywords: list[str] = [
-        # 領域關鍵字 → 直接納入（取完整匹配）
-        "世界盃", "世界杯", "FIFA", "奧運", "亞運", "NBA", "MLB",
-        "演唱會", "音樂節", "展覽", "影展", "演唱", "偶像",
-        "春節", "端午", "中秋", "跨年", "新年",
-        "天氣", "氣象", "交通", "路況", "航班", "高鐵",
-        # 賽事相關
-        "賽程", "賽果", "戰況", "戰績", "門票", "票價",
-        # 新聞/時事
-        "頭條", "熱門",
-    ]
-    for kw in all_pattern_keywords:
-        # 不分大小寫完整匹配
-        if re.search(re.escape(kw), text, re.IGNORECASE):
-            keywords.append(kw)
-
-    # ── Step 2: 中文長詞 n-gram 提取（2-4 字）─────────────
-    chinese_seqs = re.findall(r'[\u4e00-\u9fff]+', text)
-    stopword_chars = set(
-        "的是在有和與了嗎呢吧啊我你他她它我們你們大家"
-        "這那什麼怎麼為什麼如何哪哪些一下些一點個別人"
-        "可以能會要我想覺得最近現在目前今天明天昨天情況"
-        "消息進展最新推薦值得幫我給我想了解想知道請問有什麼沒"
-    )
-    for seq in chinese_seqs:
-        if len(seq) > 3:
-            ngrams = set()
-            for n in range(2, 5):
-                for i in range(len(seq) - n + 1):
-                    ngrams.add(seq[i:i+n])
-            for ng in sorted(ngrams, key=len, reverse=True):
-                if len(ng) >= 2 and all(c not in stopword_chars for c in ng):
-                    if ng not in keywords:
-                        keywords.append(ng)
-                    break
-        elif len(seq) >= 2 and seq not in stopword_chars:
-            if seq not in keywords:
-                keywords.append(seq)
-
-    # ── Step 3: 英文單字 ──────────────────────────────────
-    english_words = re.findall(r'[a-zA-Z0-9]{2,}', text)
-    en_stop = {"please", "can", "could", "would", "about", "what", "when",
-               "where", "who", "why", "how", "this", "that", "these", "those",
-               "tell", "want", "know", "looking", "find", "need", "latest",
-               "search", "from", "have", "with", "for", "the", "and", "but"}
-    for w in english_words:
-        if w.lower() not in en_stop and w not in keywords:
-            keywords.append(w)
-
-    return " ".join(keywords[:6])
 
 
 # ─── 通用爬網頁意圖偵測 ───
