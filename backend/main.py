@@ -19,7 +19,7 @@ from urllib.parse import urljoin
 HERMES_HOST = os.getenv("HERMES_HOST", "127.0.0.1")
 HERMES_PORT = int(os.getenv("HERMES_PORT", "8642"))
 API_KEY = os.getenv("API_KEY", "hermes-client-key")
-PORT = 8000
+PORT = int(os.getenv("PORT", "8000"))  # Twelve-Factor: 連接埠由環境變數控制
 
 # Allowed CLI commands (whitelist)
 ALLOWED_COMMANDS = {

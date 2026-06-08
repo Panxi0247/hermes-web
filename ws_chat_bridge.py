@@ -25,6 +25,8 @@ from fallback_web_search import SearchResult
 HERMES_HOST = os.getenv("HERMES_HOST", "127.0.0.1")
 HERMES_PORT = int(os.getenv("HERMES_PORT", "8642"))
 WS_PORT = int(os.getenv("WS_PORT", "8767"))
+# Twelve-Factor: FastAPI 後端 URL 统一從環境變數讀取
+FASTAPI_URL = os.getenv("FASTAPI_URL", "http://127.0.0.1:8000")
 
 
 # ─── 擴充版資訊意圖偵測（行程助理核心）─────────────────────────────
@@ -341,7 +343,7 @@ def crawl_via_api(keywords: str) -> str:
     # ── 用 FastAPI /api/crawl 爬取目標頁面 ──
     try:
         crawl_resp = req.post(
-            "http://localhost:8000/api/crawl",
+            f"{FASTAPI_URL}/api/crawl",
             json={"url": target_url, "max_links": 5},
             timeout=20
         )
@@ -436,7 +438,7 @@ async def fetch_news_for_topic(keywords: str) -> str:
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.post(
-                    "http://127.0.0.1:8000/api/crawl",
+                    f"{FASTAPI_URL}/api/crawl",
                     json={"url": "https://www.python.org/downloads/", "max_links": 3}
                 )
                 if resp.status_code == 200:
