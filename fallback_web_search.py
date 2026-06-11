@@ -477,8 +477,25 @@ async def web_search_async(query: str, limit: int = 10, verbose: bool = False) -
 
 
 def web_search(query: str, limit: int = 10, verbose: bool = False) -> Dict:
-    """同步包裝，並行搜尋（asyncio.run 每次建立新事件循環，overhead 可忽略）"""
-    return asyncio.run(web_search_async(query, limit, verbose))
+    """
+    同步包裝，並行搜尋。
+    支援雙模式：
+      - 從同步上下文呼叫：asyncio.run() 建立新循環（原有行為）
+      - 從已有事件循環呼叫（async 上下文）：直接 await 避免衝突
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # 沒有執行中的循環，用 asyncio.run() 建立新的
+        return asyncio.run(web_search_async(query, limit, verbose))
+
+    # 已在事件循環內，建立 Task 併入當前循環
+    async def _run():
+        return await web_search_async(query, limit, verbose)
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor() as pool:
+        future = pool.submit(asyncio.run, web_search_async(query, limit, verbose))
+        return future.result()
 
 
 def web_search_to_string(query: str, limit: int = 10, verbose: bool = False) -> str:

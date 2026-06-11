@@ -21,7 +21,7 @@ echo -e "${GREEN}[1/3]${NC} Hermes API (port 8642)"
 cd "$ROOT_DIR"
 # 若有 hermes 執行檔則啟動，否則略過
 if command -v hermes &>/dev/null; then
-  hermes &>/dev/null &
+  hermes gateway run -q &>/dev/null &
   wait_for 127.0.0.1 8642 "Hermes API"
 else
   echo -e "  ${YELLOW}⚠ Hermes API 未安裝（需另外啟動）${NC}"
@@ -30,13 +30,13 @@ fi
 # 2. 啟動 FastAPI 後端（背景）
 echo -e "\n${GREEN}[2/3]${NC} FastAPI Backend (port 8000)"
 cd "$BACKEND_DIR"
-python -m uvicorn main:app --host 0.0.0.0 --port 8000 &>/dev/null &
+python3 -m uvicorn main:app --host 0.0.0.0 --port 8000 &>/dev/null &
 wait_for 127.0.0.1 8000 "FastAPI"
 
 # 3. 啟動 ws_chat_bridge（背景）
 echo -e "\n${GREEN}[3/3]${NC} ws_chat_bridge (port 8767)"
 cd "$ROOT_DIR"
-python ws_chat_bridge.py 8767 &>/dev/null &
+python3 ws_chat_bridge.py 8767 &>/dev/null &
 wait_for 127.0.0.1 8767 "ws_chat_bridge"
 
 # 4. 啟動 Vite 前端（前景，會佔用終端）
